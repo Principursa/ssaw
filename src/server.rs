@@ -146,8 +146,10 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
         "get_address" => parse_params::<AddressParams>(&request.params).and_then(|params| {
             let target =
                 wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
-            wallet::derive_address(&paths, target.index)
-                .map(|address| json!({ "address": address, "index": target.index, "alias": target.alias }))
+            let aliases = wallet::aliases_for_index(&paths, target.index)?;
+            wallet::derive_address(&paths, target.index).map(|address| {
+                json!({ "address": address, "index": target.index, "alias": target.alias, "aliases": aliases })
+            })
         }),
         "list_addresses" => {
             parse_params::<ListAddressesParams>(&request.params).and_then(|params| {

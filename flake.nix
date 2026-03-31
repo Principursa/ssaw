@@ -20,13 +20,29 @@
           "rustfmt"
           "clippy"
         ];
-      in {
+        devShellRunner = pkgs.writeShellScriptBin "ssaw" ''
+          exec cargo run -- "$@"
+        '';
+      in rec {
+        packages.default = pkgs.rustPlatform.buildRustPackage {
+          pname = "ssaw";
+          version = "0.1.0";
+          src = ./.;
+          cargoLock.lockFile = ./Cargo.lock;
+        };
+
+        apps.default = flake-utils.lib.mkApp {
+          drv = packages.default;
+        };
+
         devShells.default = pkgs.mkShell {
-          buildInputs = [
+          packages = [
             rust
             pkgs.rust-analyzer
             pkgs.pkg-config
             pkgs.openssl
+            pkgs.foundry
+            devShellRunner
           ];
         };
       }

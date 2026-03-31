@@ -50,6 +50,8 @@ pub struct AddressTarget {
 pub struct DerivedAddress {
     pub index: u32,
     pub address: String,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -172,8 +174,25 @@ pub fn list_addresses(paths: &Paths, count: Option<u32>) -> Result<Vec<DerivedAd
         .unwrap_or(DEFAULT_ADDRESS_COUNT)
         .min(MAX_ADDRESS_COUNT);
     (0..count)
-        .map(|index| derive_address(paths, index).map(|address| DerivedAddress { index, address }))
+        .map(|index| {
+            let aliases = crate::alias::aliases_for_index(paths, index)?
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            derive_address(paths, index).map(|address| DerivedAddress {
+                index,
+                address,
+                aliases,
+            })
+        })
         .collect()
+}
+
+pub fn aliases_for_index(paths: &Paths, index: u32) -> Result<Vec<String>> {
+    Ok(crate::alias::aliases_for_index(paths, index)?
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect())
 }
 
 pub fn sign_message(paths: &Paths, message: &str, index: u32) -> Result<SignatureOutput> {

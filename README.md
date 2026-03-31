@@ -22,7 +22,6 @@ Implemented today:
 
 Planned but not implemented yet:
 
-- address aliases like `deployer` or `oracle`
 - hardened MCP/server mode
 - spending policy controls
 - Foundry integration
@@ -41,6 +40,15 @@ Enter the dev shell:
 
 ```sh
 nix develop
+```
+
+Inside the dev shell, `ssaw` and `anvil` are available on `PATH`.
+The in-shell `ssaw` command is a thin wrapper around `cargo run`, so it tracks your local checkout without requiring a separate install step.
+
+You can also run the packaged app directly:
+
+```sh
+nix run
 ```
 
 Initialize a new wallet:
@@ -139,6 +147,8 @@ Use an alias anywhere an address index matters:
 cargo run -- address --alias deployer
 cargo run -- sign-message "hello" --alias deployer
 ```
+
+`list_addresses` and `get_address` responses also include alias metadata when available.
 
 ## Wallet Commands
 
@@ -329,6 +339,11 @@ Run the test suite:
 ```sh
 nix develop --no-update-lock-file -c cargo test
 ```
+
+The test suite now includes:
+
+- CLI/project/alias integration coverage in `tests/cli_flow.rs`
+- Anvil-backed transaction and contract flow coverage in `tests/anvil_flow.rs`
 
 For isolated local testing, use a temporary home directory:
 
