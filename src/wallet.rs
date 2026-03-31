@@ -40,6 +40,13 @@ pub struct WalletSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AddressTarget {
+    pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct DerivedAddress {
     pub index: u32,
     pub address: String,
@@ -139,6 +146,25 @@ pub fn import(paths: &Paths, phrase: String, passphrase: Option<String>) -> Resu
 pub fn derive_address(paths: &Paths, index: u32) -> Result<String> {
     let signer = signer_for_index(paths, index)?;
     Ok(format!("{:#x}", signer.address()))
+}
+
+pub fn resolve_address_target(
+    paths: &Paths,
+    index: Option<u32>,
+    alias: Option<&str>,
+) -> Result<AddressTarget> {
+    match (index, alias) {
+        (Some(index), None) => Ok(AddressTarget { index, alias: None }),
+        (None, Some(alias)) => Ok(AddressTarget {
+            index: crate::alias::resolve_alias(paths, alias)?,
+            alias: Some(alias.to_owned()),
+        }),
+        (None, None) => Ok(AddressTarget {
+            index: 0,
+            alias: None,
+        }),
+        (Some(_), Some(_)) => bail!("use either index or alias, not both"),
+    }
 }
 
 pub fn list_addresses(paths: &Paths, count: Option<u32>) -> Result<Vec<DerivedAddress>> {
@@ -374,6 +400,15 @@ fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> 
 }
 
 fn load_payload(paths: &Paths) -> Result<SeedPayload> {
+    if !paths.seed_file.exists() {
+        bail!(
+            "project `{}` has no wallet seed yet; run `ssaw --project {} init` or `ssaw --project {} import`",
+            paths.project_name,
+            paths.project_name,
+            paths.project_name
+        );
+    }
+
     let identity_path = paths.identity_file()?;
     let identity = load_identity(&identity_path)?;
     let encrypted = fs::read(&paths.seed_file)
@@ -617,6 +652,14 @@ mod tests {
         let wait = WaitOptions::from_flag(true, 90);
         assert!(wait.wait);
         assert_eq!(wait.timeout_secs, 90);
+    }
+
+    #[test]
+    fn resolve_address_target_defaults_to_index_zero() {
+        let paths = Paths::discover().expect("paths");
+        let target = resolve_address_target(&paths, None, None).expect("target");
+        assert_eq!(target.index, 0);
+        assert!(target.alias.is_none());
     }
 
     #[test]

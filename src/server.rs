@@ -18,7 +18,8 @@ struct Request {
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct AddressParams {
-    index: u32,
+    index: Option<u32>,
+    alias: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -31,14 +32,18 @@ struct ListAddressesParams {
 struct SignMessageParams {
     message: String,
     #[serde(default)]
-    index: u32,
+    index: Option<u32>,
+    #[serde(default)]
+    alias: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct SignTypedDataParams {
     typed_data: Value,
     #[serde(default)]
-    index: u32,
+    index: Option<u32>,
+    #[serde(default)]
+    alias: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,7 +58,9 @@ struct SendTransactionParams {
     #[serde(default = "default_timeout_secs")]
     timeout_secs: u64,
     #[serde(default)]
-    index: u32,
+    index: Option<u32>,
+    #[serde(default)]
+    alias: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -81,7 +88,9 @@ struct WriteContractParams {
     #[serde(default = "default_timeout_secs")]
     timeout_secs: u64,
     #[serde(default)]
-    index: u32,
+    index: Option<u32>,
+    #[serde(default)]
+    alias: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,7 +133,10 @@ pub async fn run(paths: &Paths) -> Result<()> {
 async fn handle_request(paths: &Paths, request: &Request) -> Response {
     let result = match request.method.as_str() {
         "get_address" => parse_params::<AddressParams>(&request.params).and_then(|params| {
-            wallet::derive_address(paths, params.index).map(|address| json!({ "address": address }))
+            let target =
+                wallet::resolve_address_target(paths, params.index, params.alias.as_deref())?;
+            wallet::derive_address(paths, target.index)
+                .map(|address| json!({ "address": address, "index": target.index, "alias": target.alias }))
         }),
         "list_addresses" => {
             parse_params::<ListAddressesParams>(&request.params).and_then(|params| {
@@ -133,16 +145,21 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
             })
         }
         "sign_message" => parse_params::<SignMessageParams>(&request.params).and_then(|params| {
-            wallet::sign_message(paths, &params.message, params.index)
-                .map(|signed| json!({ "address": signed.address, "signature": signed.signature }))
+            let target =
+                wallet::resolve_address_target(paths, params.index, params.alias.as_deref())?;
+            wallet::sign_message(paths, &params.message, target.index).map(|signed| {
+                json!({ "address": signed.address, "signature": signed.signature, "index": target.index, "alias": target.alias })
+            })
         }),
         "sign_typed_data" => {
             parse_params::<SignTypedDataParams>(&request.params).and_then(|params| {
                 let typed_data = serde_json::to_string(&params.typed_data)
                     .context("failed to serialize typed data payload")?;
-                wallet::sign_typed_data(paths, &typed_data, params.index).map(
-                    |signed| json!({ "address": signed.address, "signature": signed.signature }),
-                )
+                let target =
+                    wallet::resolve_address_target(paths, params.index, params.alias.as_deref())?;
+                wallet::sign_typed_data(paths, &typed_data, target.index).map(|signed| {
+                    json!({ "address": signed.address, "signature": signed.signature, "index": target.index, "alias": target.alias })
+                })
             })
         }
         "send_transaction" => {
@@ -150,17 +167,24 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
             match params.and_then(|params| {
                 chain_selector_from_json(&params.chain).map(|selector| (params, selector))
             }) {
-                Ok((params, selector)) => wallet::send_transaction(
-                    paths,
-                    &selector,
-                    &params.to,
-                    &params.value_wei,
-                    params.data.as_deref(),
-                    wallet::WaitOptions::from_flag(params.wait, params.timeout_secs),
-                    params.index,
-                )
-                .await
-                .map(|sent| serde_json::to_value(&sent).expect("sent tx serializes")),
+                Ok((params, selector)) => {
+                    let target =
+                        wallet::resolve_address_target(paths, params.index, params.alias.as_deref());
+                    match target {
+                        Ok(target) => wallet::send_transaction(
+                            paths,
+                            &selector,
+                            &params.to,
+                            &params.value_wei,
+                            params.data.as_deref(),
+                            wallet::WaitOptions::from_flag(params.wait, params.timeout_secs),
+                            target.index,
+                        )
+                        .await
+                        .map(|sent| serde_json::to_value(&sent).expect("sent tx serializes")),
+                        Err(error) => Err(error),
+                    }
+                }
                 Err(error) => Err(error),
             }
         }
@@ -198,19 +222,32 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
                     let abi_json = serde_json::to_string(&params.abi)
                         .context("failed to serialize contract ABI payload");
                     match abi_json {
-                        Ok(abi_json) => wallet::write_contract(
-                            paths,
-                            &selector,
-                            &params.address,
-                            &abi_json,
-                            &params.function,
-                            &params.args,
-                            params.value_wei.as_deref(),
-                            wallet::WaitOptions::from_flag(params.wait, params.timeout_secs),
-                            params.index,
-                        )
-                        .await
-                        .map(|sent| serde_json::to_value(&sent).expect("sent tx serializes")),
+                        Ok(abi_json) => {
+                            let target = wallet::resolve_address_target(
+                                paths,
+                                params.index,
+                                params.alias.as_deref(),
+                            );
+                            match target {
+                                Ok(target) => wallet::write_contract(
+                                    paths,
+                                    &selector,
+                                    &params.address,
+                                    &abi_json,
+                                    &params.function,
+                                    &params.args,
+                                    params.value_wei.as_deref(),
+                                    wallet::WaitOptions::from_flag(
+                                        params.wait,
+                                        params.timeout_secs,
+                                    ),
+                                    target.index,
+                                )
+                                .await
+                                .map(|sent| serde_json::to_value(&sent).expect("sent tx serializes")),
+                                Err(error) => Err(error),
+                            }
+                        }
                         Err(error) => Err(error),
                     }
                 }

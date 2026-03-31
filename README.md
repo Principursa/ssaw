@@ -9,7 +9,7 @@ SSAW is a local Ethereum wallet intended for agent use. It keeps wallet material
 Implemented today:
 
 - dedicated SSAW age identity at `~/.config/ssaw/identity.txt`
-- encrypted wallet seed at `~/.ssaw/seed.age`
+- project-aware wallet storage
 - address derivation from a BIP-39 mnemonic
 - message signing
 - EIP-712 typed data signing
@@ -22,13 +22,18 @@ Implemented today:
 
 Planned but not implemented yet:
 
-- project-scoped wallets
 - address aliases like `deployer` or `oracle`
 - hardened MCP/server mode
 - spending policy controls
 - Foundry integration
 
 The authoritative design notes are in [SPEC.md](./SPEC.md), but this README reflects what the code can actually do right now.
+
+The intended daily flow is:
+
+- use `project ...` to create or switch the active project
+- run normal wallet commands against that active project
+- use `--project` only as an explicit override when scripting or comparing projects side by side
 
 ## Setup
 
@@ -54,6 +59,85 @@ Check local state paths:
 
 ```sh
 cargo run -- doctor
+```
+
+## Projects
+
+SSAW now supports project selection.
+
+Current layout:
+
+- the legacy root wallet is the `default` project
+- named projects live under `~/.ssaw/projects/<name>/`
+- the selected project is stored in `~/.ssaw/current-project`
+
+Create and switch to a project:
+
+```sh
+cargo run -- project init dex
+```
+
+That creates the project, initializes its wallet, and selects it.
+
+Import directly into a project:
+
+```sh
+printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- project import imported
+```
+
+Switch between projects:
+
+```sh
+cargo run -- project use default
+cargo run -- project use dex
+```
+
+List projects:
+
+```sh
+cargo run -- project list
+```
+
+Show the current project:
+
+```sh
+cargo run -- project current
+```
+
+You can also override the selected project per command, but that is meant more for scripts and one-off targeting than normal interactive use:
+
+```sh
+cargo run -- --project dex address
+cargo run -- --project dex serve
+```
+
+## Aliases
+
+Aliases are project-local names for derived address indices.
+
+Set an alias:
+
+```sh
+cargo run -- alias set deployer --index 0 --label deployer --label admin
+```
+
+List aliases:
+
+```sh
+cargo run -- alias list
+```
+
+Show one alias:
+
+```sh
+cargo run -- alias show deployer
+```
+
+Use an alias anywhere an address index matters:
+
+```sh
+cargo run -- address --alias deployer
+cargo run -- sign-message "hello" --alias deployer
 ```
 
 ## Wallet Commands
@@ -117,6 +201,7 @@ Note:
 
 - a freshly initialized wallet will not be funded on Anvil by default
 - fund the derived address first, or import a funded mnemonic
+- transactions use the currently selected project unless `--project` is passed
 
 ## Contract Calls
 
@@ -190,7 +275,16 @@ cargo run -- serve
 
 Each request is one JSON line on stdin. Each response is one JSON line on stdout.
 
-Within one `ssaw serve` process, requests are handled sequentially. Across multiple CLI/server processes sharing the same wallet, write operations are serialized by a wallet lock file at `~/.ssaw/wallet.lock`.
+Within one `ssaw serve` process, requests are handled sequentially. Across multiple CLI/server processes sharing the same wallet, write operations are serialized by a project-local wallet lock file:
+
+- `default`: `~/.ssaw/wallet.lock`
+- named project: `~/.ssaw/projects/<name>/wallet.lock`
+
+If you want a separate stdio wallet for a separate workstream, start `serve` with a different project:
+
+```sh
+cargo run -- --project dex serve
+```
 
 Currently supported methods:
 
@@ -201,6 +295,8 @@ Currently supported methods:
 - `send_transaction`
 - `read_contract`
 - `write_contract`
+
+Address-targeting methods also accept `alias` in place of `index` for project-local alias lookup.
 
 Examples:
 

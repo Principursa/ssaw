@@ -9,6 +9,8 @@ use crate::wallet;
 #[derive(Debug, Parser)]
 #[command(name = "ssaw", version, about = "Shark's Secure Agent Wallet")]
 pub struct Cli {
+    #[arg(long, global = true)]
+    project: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -17,6 +19,14 @@ pub struct Cli {
 enum Command {
     Init,
     Import(ImportArgs),
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+    Alias {
+        #[command(subcommand)]
+        command: AliasCommand,
+    },
     Address(AddressArgs),
     AddChain(AddChainArgs),
     ListChains,
@@ -29,6 +39,39 @@ enum Command {
     Serve,
 }
 
+#[derive(Debug, Subcommand)]
+enum ProjectCommand {
+    Init(ProjectInitArgs),
+    Import(ProjectImportArgs),
+    Use(ProjectUseArgs),
+    List,
+    Current,
+}
+
+#[derive(Debug, Subcommand)]
+enum AliasCommand {
+    Set(AliasSetArgs),
+    List,
+    Show(AliasShowArgs),
+}
+
+#[derive(Debug, Args)]
+struct ProjectInitArgs {
+    name: String,
+}
+
+#[derive(Debug, Args)]
+struct ProjectImportArgs {
+    name: String,
+    #[arg(long, default_value_t = false)]
+    passphrase_stdin: bool,
+}
+
+#[derive(Debug, Args)]
+struct ProjectUseArgs {
+    name: String,
+}
+
 #[derive(Debug, Args)]
 struct ImportArgs {
     #[arg(long, default_value_t = false)]
@@ -37,8 +80,30 @@ struct ImportArgs {
 
 #[derive(Debug, Args)]
 struct AddressArgs {
-    #[arg(long, default_value_t = 0)]
+    #[command(flatten)]
+    target: AddressTargetArgs,
+}
+
+#[derive(Debug, Args, Default, Clone)]
+struct AddressTargetArgs {
+    #[arg(long, conflicts_with = "alias")]
+    index: Option<u32>,
+    #[arg(long, conflicts_with = "index")]
+    alias: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct AliasSetArgs {
+    name: String,
+    #[arg(long)]
     index: u32,
+    #[arg(long = "label")]
+    labels: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct AliasShowArgs {
+    name: String,
 }
 
 #[derive(Debug, Args)]
@@ -52,14 +117,14 @@ struct AddChainArgs {
 #[derive(Debug, Args)]
 struct SignMessageArgs {
     message: String,
-    #[arg(long, default_value_t = 0)]
-    index: u32,
+    #[command(flatten)]
+    target: AddressTargetArgs,
 }
 
 #[derive(Debug, Args)]
 struct SignTypedDataArgs {
-    #[arg(long, default_value_t = 0)]
-    index: u32,
+    #[command(flatten)]
+    target: AddressTargetArgs,
 }
 
 #[derive(Debug, Args)]
@@ -76,8 +141,8 @@ struct SendTransactionArgs {
     wait: bool,
     #[arg(long, default_value_t = 60)]
     timeout_secs: u64,
-    #[arg(long, default_value_t = 0)]
-    index: u32,
+    #[command(flatten)]
+    target: AddressTargetArgs,
 }
 
 #[derive(Debug, Args)]
@@ -112,17 +177,19 @@ struct WriteContractArgs {
     wait: bool,
     #[arg(long, default_value_t = 60)]
     timeout_secs: u64,
-    #[arg(long, default_value_t = 0)]
-    index: u32,
+    #[command(flatten)]
+    target: AddressTargetArgs,
 }
 
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let paths = Paths::discover()?;
+    let paths = Paths::discover_with_project(cli.project.as_deref())?;
 
     match cli.command {
         Command::Init => cmd_init(&paths),
         Command::Import(args) => cmd_import(&paths, args),
+        Command::Project { command } => cmd_project(&paths, command),
+        Command::Alias { command } => cmd_alias(&paths, command),
         Command::Address(args) => cmd_address(&paths, args),
         Command::AddChain(args) => cmd_add_chain(&paths, args),
         Command::ListChains => cmd_list_chains(&paths),
@@ -136,10 +203,134 @@ pub async fn run() -> Result<()> {
     }
 }
 
+fn cmd_alias(paths: &Paths, command: AliasCommand) -> Result<()> {
+    match command {
+        AliasCommand::Set(args) => cmd_alias_set(paths, args),
+        AliasCommand::List => cmd_alias_list(paths),
+        AliasCommand::Show(args) => cmd_alias_show(paths, &args.name),
+    }
+}
+
+fn cmd_project(paths: &Paths, command: ProjectCommand) -> Result<()> {
+    match command {
+        ProjectCommand::Init(args) => cmd_project_init(paths, &args.name),
+        ProjectCommand::Import(args) => cmd_project_import(paths, args),
+        ProjectCommand::Use(args) => cmd_project_use(paths, &args.name),
+        ProjectCommand::List => cmd_project_list(paths),
+        ProjectCommand::Current => {
+            println!("{}", paths.project_name);
+            Ok(())
+        }
+    }
+}
+
+fn cmd_project_init(paths: &Paths, project_name: &str) -> Result<()> {
+    crate::config::validate_project_name(project_name)?;
+    let project_paths = Paths::discover_with_project(Some(project_name))?;
+    project_paths.ensure_parent_dirs()?;
+    paths.write_current_project(project_name)?;
+    let (identity_path, recipient) = wallet::ensure_identity(&project_paths)?;
+    let (mnemonic, summary) = wallet::init(&project_paths)?;
+    println!("Project: {project_name}");
+    println!("SSAW identity: {}", identity_path.display());
+    println!("SSAW recipient: {recipient}");
+    println!();
+    println!("Mnemonic:");
+    println!("{mnemonic}");
+    println!();
+    println!("Address[0]: {}", summary.address);
+    println!();
+    println!("Selected project `{project_name}`");
+    Ok(())
+}
+
+fn cmd_project_import(paths: &Paths, args: ProjectImportArgs) -> Result<()> {
+    crate::config::validate_project_name(&args.name)?;
+    let project_paths = Paths::discover_with_project(Some(&args.name))?;
+    project_paths.ensure_parent_dirs()?;
+    paths.write_current_project(&args.name)?;
+    let phrase = wallet::read_phrase_from_stdin()?;
+    let passphrase = if args.passphrase_stdin {
+        Some(wallet::read_secret_line("BIP-39 passphrase: ")?)
+    } else {
+        None
+    };
+    let summary = wallet::import(&project_paths, phrase, passphrase)?;
+    println!("Project: {}", project_paths.project_name);
+    println!("Address[0]: {}", summary.address);
+    println!("Selected project `{}`", project_paths.project_name);
+    Ok(())
+}
+
+fn cmd_project_use(paths: &Paths, project_name: &str) -> Result<()> {
+    crate::config::validate_project_name(project_name)?;
+    let project_paths = Paths::discover_with_project(Some(project_name))?;
+    if project_name != "default" && !project_paths.project_dir.exists() {
+        bail!("unknown project `{project_name}`");
+    }
+
+    paths.write_current_project(project_name)?;
+    println!("Selected project `{project_name}`");
+    Ok(())
+}
+
+fn cmd_project_list(paths: &Paths) -> Result<()> {
+    for project_name in paths.list_projects()? {
+        let marker = if project_name == paths.project_name {
+            "*"
+        } else {
+            " "
+        };
+        println!("{marker} {project_name}");
+    }
+    Ok(())
+}
+
+fn cmd_alias_set(paths: &Paths, args: AliasSetArgs) -> Result<()> {
+    crate::alias::set_alias(paths, &args.name, args.index, args.labels)?;
+    println!("Set alias `{}` -> index {}", args.name, args.index);
+    Ok(())
+}
+
+fn cmd_alias_list(paths: &Paths) -> Result<()> {
+    let aliases = crate::alias::list_aliases(paths)?;
+    if aliases.is_empty() {
+        println!("No aliases configured.");
+        return Ok(());
+    }
+
+    for alias in aliases {
+        let labels = if alias.labels.is_empty() {
+            "-".to_owned()
+        } else {
+            alias.labels.join(",")
+        };
+        println!("{}\t{}\t{}", alias.name, alias.index, labels);
+    }
+    Ok(())
+}
+
+fn cmd_alias_show(paths: &Paths, name: &str) -> Result<()> {
+    let alias = crate::alias::get_alias(paths, name)?
+        .with_context(|| format!("unknown alias `{name}` in project `{}`", paths.project_name))?;
+    println!("name\t{name}");
+    println!("index\t{}", alias.index);
+    println!(
+        "labels\t{}",
+        if alias.labels.is_empty() {
+            "-".to_owned()
+        } else {
+            alias.labels.join(",")
+        }
+    );
+    Ok(())
+}
+
 fn cmd_init(paths: &Paths) -> Result<()> {
     let (identity_path, recipient) = wallet::ensure_identity(paths)?;
     let (mnemonic, summary) = wallet::init(paths)?;
 
+    println!("Project: {}", paths.project_name);
     println!("SSAW identity: {}", identity_path.display());
     println!("SSAW recipient: {recipient}");
     println!();
@@ -158,12 +349,15 @@ fn cmd_import(paths: &Paths, args: ImportArgs) -> Result<()> {
         None
     };
     let summary = wallet::import(paths, phrase, passphrase)?;
+    println!("Project: {}", paths.project_name);
     println!("Address[0]: {}", summary.address);
     Ok(())
 }
 
 fn cmd_address(paths: &Paths, args: AddressArgs) -> Result<()> {
-    let address = wallet::derive_address(paths, args.index)?;
+    let target =
+        wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
+    let address = wallet::derive_address(paths, target.index)?;
     println!("{address}");
     Ok(())
 }
@@ -193,7 +387,9 @@ fn cmd_list_chains(paths: &Paths) -> Result<()> {
 }
 
 fn cmd_sign_message(paths: &Paths, args: SignMessageArgs) -> Result<()> {
-    let output = wallet::sign_message(paths, &args.message, args.index)?;
+    let target =
+        wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
+    let output = wallet::sign_message(paths, &args.message, target.index)?;
     println!("{}", output.signature);
     Ok(())
 }
@@ -201,13 +397,17 @@ fn cmd_sign_message(paths: &Paths, args: SignMessageArgs) -> Result<()> {
 fn cmd_sign_typed_data(paths: &Paths, args: SignTypedDataArgs) -> Result<()> {
     let typed_data_json =
         wallet::read_phrase_from_stdin().context("failed to read typed data JSON from stdin")?;
-    let output = wallet::sign_typed_data(paths, &typed_data_json, args.index)?;
+    let target =
+        wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
+    let output = wallet::sign_typed_data(paths, &typed_data_json, target.index)?;
     println!("{}", output.signature);
     Ok(())
 }
 
 async fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Result<()> {
     let selector = chain::ChainSelector::parse(&args.chain);
+    let target =
+        wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
     let sent = wallet::send_transaction(
         paths,
         &selector,
@@ -215,7 +415,7 @@ async fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Resul
         &args.value_wei,
         args.data.as_deref(),
         wallet::WaitOptions::from_flag(args.wait, args.timeout_secs),
-        args.index,
+        target.index,
     )
     .await?;
     if sent.confirmed {
@@ -261,6 +461,8 @@ async fn cmd_write_contract(paths: &Paths, args: WriteContractArgs) -> Result<()
     let abi_json =
         wallet::read_phrase_from_stdin().context("failed to read ABI JSON from stdin")?;
     let selector = chain::ChainSelector::parse(&args.chain);
+    let target =
+        wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
     let sent = wallet::write_contract(
         paths,
         &selector,
@@ -270,7 +472,7 @@ async fn cmd_write_contract(paths: &Paths, args: WriteContractArgs) -> Result<()
         &args.args,
         args.value_wei.as_deref(),
         wallet::WaitOptions::from_flag(args.wait, args.timeout_secs),
-        args.index,
+        target.index,
     )
     .await?;
     if sent.confirmed {
@@ -286,7 +488,14 @@ async fn cmd_write_contract(paths: &Paths, args: WriteContractArgs) -> Result<()
 
 fn cmd_doctor(paths: &Paths) -> Result<()> {
     let identity = paths.identity_file()?;
+    println!("project\t{}", paths.project_name);
     println!("state_dir\t{}", paths.state_dir.display());
+    println!("project_dir\t{}", paths.project_dir.display());
+    println!(
+        "current_project_file\t{}\t{}",
+        paths.current_project_file.display(),
+        exists_marker(&paths.current_project_file)
+    );
     println!("config_dir\t{}", paths.config_dir.display());
     println!(
         "seed_file\t{}\t{}",
@@ -297,6 +506,11 @@ fn cmd_doctor(paths: &Paths) -> Result<()> {
         "chains_file\t{}\t{}",
         paths.chains_file.display(),
         exists_marker(&paths.chains_file)
+    );
+    println!(
+        "addresses_file\t{}\t{}",
+        paths.addresses_file.display(),
+        exists_marker(&paths.addresses_file)
     );
     println!(
         "identity_file\t{}\t{}",

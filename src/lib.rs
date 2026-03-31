@@ -1,3 +1,4 @@
+pub mod alias;
 pub mod chain;
 pub mod cli;
 pub mod config;
