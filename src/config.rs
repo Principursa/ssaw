@@ -10,6 +10,7 @@ pub struct Paths {
     pub config_dir: PathBuf,
     pub seed_file: PathBuf,
     pub chains_file: PathBuf,
+    pub lock_file: PathBuf,
     pub config_file: PathBuf,
     pub default_identity_file: PathBuf,
 }
@@ -28,6 +29,7 @@ impl Paths {
         Ok(Self {
             seed_file: state_dir.join("seed.age"),
             chains_file: state_dir.join("chains.toml"),
+            lock_file: state_dir.join("wallet.lock"),
             config_file: config_dir.join("config.toml"),
             default_identity_file: config_dir.join("identity.txt"),
             state_dir,

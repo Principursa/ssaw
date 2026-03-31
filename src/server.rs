@@ -49,6 +49,10 @@ struct SendTransactionParams {
     #[serde(default)]
     data: Option<String>,
     #[serde(default)]
+    wait: bool,
+    #[serde(default = "default_timeout_secs")]
+    timeout_secs: u64,
+    #[serde(default)]
     index: u32,
 }
 
@@ -72,6 +76,10 @@ struct WriteContractParams {
     args: Vec<String>,
     #[serde(default)]
     value_wei: Option<String>,
+    #[serde(default)]
+    wait: bool,
+    #[serde(default = "default_timeout_secs")]
+    timeout_secs: u64,
     #[serde(default)]
     index: u32,
 }
@@ -148,10 +156,11 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
                     &params.to,
                     &params.value_wei,
                     params.data.as_deref(),
+                    wallet::WaitOptions::from_flag(params.wait, params.timeout_secs),
                     params.index,
                 )
                 .await
-                .map(|sent| json!({ "tx_hash": sent.tx_hash })),
+                .map(|sent| serde_json::to_value(&sent).expect("sent tx serializes")),
                 Err(error) => Err(error),
             }
         }
@@ -197,10 +206,11 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
                             &params.function,
                             &params.args,
                             params.value_wei.as_deref(),
+                            wallet::WaitOptions::from_flag(params.wait, params.timeout_secs),
                             params.index,
                         )
                         .await
-                        .map(|sent| json!({ "tx_hash": sent.tx_hash })),
+                        .map(|sent| serde_json::to_value(&sent).expect("sent tx serializes")),
                         Err(error) => Err(error),
                     }
                 }
@@ -240,6 +250,10 @@ fn chain_selector_from_json(value: &Value) -> Result<crate::chain::ChainSelector
             .context("chain number must be an unsigned integer"),
         _ => bail!("chain must be a string name or numeric chain id"),
     }
+}
+
+fn default_timeout_secs() -> u64 {
+    60
 }
 
 #[cfg(test)]

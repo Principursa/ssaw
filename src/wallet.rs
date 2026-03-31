@@ -1,11 +1,14 @@
 use std::fs;
+use std::fs::File;
 use std::io::{Read, Write};
 use std::iter;
 use std::path::Path;
 use std::str::FromStr;
+use std::time::Duration;
 
 use age::secrecy::ExposeSecret;
 use alloy::{
+    network::ReceiptResponse,
     network::TransactionBuilder,
     primitives::{Address, Bytes, U256},
     providers::{Provider, ProviderBuilder},
@@ -20,6 +23,7 @@ use alloy_signer::SignerSync;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use anyhow::{Context, Result, bail};
 use bip39::{Language, Mnemonic};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
@@ -50,6 +54,51 @@ pub struct SignatureOutput {
 #[derive(Debug, Clone, Serialize)]
 pub struct SentTransaction {
     pub tx_hash: String,
+    pub confirmed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<TransactionReceiptSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransactionReceiptSummary {
+    pub tx_hash: String,
+    pub status: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub block_number: Option<u64>,
+    pub gas_used: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct WaitOptions {
+    pub wait: bool,
+    pub timeout_secs: u64,
+}
+
+impl WaitOptions {
+    pub fn from_flag(wait: bool, timeout_secs: u64) -> Self {
+        Self { wait, timeout_secs }
+    }
+}
+
+struct WriteGuard {
+    file: File,
+}
+
+impl WriteGuard {
+    fn acquire(paths: &Paths) -> Result<Self> {
+        paths.ensure_parent_dirs()?;
+        let file = File::create(&paths.lock_file)
+            .with_context(|| format!("failed to open {}", paths.lock_file.display()))?;
+        file.lock_exclusive()
+            .with_context(|| format!("failed to lock {}", paths.lock_file.display()))?;
+        Ok(Self { file })
+    }
+}
+
+impl Drop for WriteGuard {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -137,8 +186,10 @@ pub async fn send_transaction(
     to: &str,
     value_wei: &str,
     data: Option<&str>,
+    wait: WaitOptions,
     index: u32,
 ) -> Result<SentTransaction> {
+    let _guard = WriteGuard::acquire(paths)?;
     let chain = chain::resolve(paths, selector)?;
     let signer = signer_for_index(paths, index)?;
     let rpc_url = chain
@@ -161,9 +212,7 @@ pub async fn send_transaction(
         .await
         .context("failed to send transaction")?;
 
-    Ok(SentTransaction {
-        tx_hash: format!("{:#x}", pending.tx_hash()),
-    })
+    finalize_pending_transaction(pending, wait).await
 }
 
 pub async fn read_contract(
@@ -204,8 +253,10 @@ pub async fn write_contract(
     function: &str,
     args: &[String],
     value_wei: Option<&str>,
+    wait: WaitOptions,
     index: u32,
 ) -> Result<SentTransaction> {
+    let _guard = WriteGuard::acquire(paths)?;
     let chain = chain::resolve(paths, selector)?;
     let signer = signer_for_index(paths, index)?;
     let rpc_url = chain
@@ -230,9 +281,7 @@ pub async fn write_contract(
         .await
         .with_context(|| format!("failed to send contract call `{function}`"))?;
 
-    Ok(SentTransaction {
-        tx_hash: format!("{:#x}", pending.tx_hash()),
-    })
+    finalize_pending_transaction(pending, wait).await
 }
 
 pub fn ensure_identity(paths: &Paths) -> Result<(std::path::PathBuf, String)> {
@@ -374,6 +423,37 @@ fn parse_hex_bytes(value: &str) -> Result<Bytes> {
 
 fn parse_u256_dec(value: &str) -> Result<U256> {
     U256::from_str_radix(value, 10).with_context(|| format!("invalid decimal U256 `{value}`"))
+}
+
+async fn finalize_pending_transaction<N: alloy::network::Network>(
+    pending: alloy::providers::PendingTransactionBuilder<N>,
+    wait: WaitOptions,
+) -> Result<SentTransaction> {
+    let tx_hash = format!("{:#x}", pending.tx_hash());
+    if !wait.wait {
+        return Ok(SentTransaction {
+            tx_hash,
+            confirmed: false,
+            receipt: None,
+        });
+    }
+
+    let receipt = pending
+        .with_timeout(Some(Duration::from_secs(wait.timeout_secs)))
+        .get_receipt()
+        .await
+        .context("failed waiting for transaction receipt")?;
+
+    Ok(SentTransaction {
+        tx_hash,
+        confirmed: true,
+        receipt: Some(TransactionReceiptSummary {
+            tx_hash: format!("{:#x}", receipt.transaction_hash()),
+            status: receipt.status(),
+            block_number: receipt.block_number(),
+            gas_used: receipt.gas_used(),
+        }),
+    })
 }
 
 fn parse_interface(abi_json: &str) -> Result<Interface> {
@@ -530,5 +610,18 @@ mod tests {
                 ]),
             ])
         );
+    }
+
+    #[test]
+    fn wait_options_from_flag() {
+        let wait = WaitOptions::from_flag(true, 90);
+        assert!(wait.wait);
+        assert_eq!(wait.timeout_secs, 90);
+    }
+
+    #[test]
+    fn write_guard_uses_wallet_lock_path() {
+        let paths = Paths::discover().expect("paths");
+        assert!(paths.lock_file.ends_with("wallet.lock"));
     }
 }

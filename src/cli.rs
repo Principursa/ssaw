@@ -72,6 +72,10 @@ struct SendTransactionArgs {
     value_wei: String,
     #[arg(long)]
     data: Option<String>,
+    #[arg(long, default_value_t = false)]
+    wait: bool,
+    #[arg(long, default_value_t = 60)]
+    timeout_secs: u64,
     #[arg(long, default_value_t = 0)]
     index: u32,
 }
@@ -104,6 +108,10 @@ struct WriteContractArgs {
     args: Vec<String>,
     #[arg(long)]
     value_wei: Option<String>,
+    #[arg(long, default_value_t = false)]
+    wait: bool,
+    #[arg(long, default_value_t = 60)]
+    timeout_secs: u64,
     #[arg(long, default_value_t = 0)]
     index: u32,
 }
@@ -206,10 +214,18 @@ async fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Resul
         &args.to,
         &args.value_wei,
         args.data.as_deref(),
+        wallet::WaitOptions::from_flag(args.wait, args.timeout_secs),
         args.index,
     )
     .await?;
-    println!("{}", sent.tx_hash);
+    if sent.confirmed {
+        println!(
+            "{}",
+            serde_json::to_string(&sent).context("failed to render send result")?
+        );
+    } else {
+        println!("{}", sent.tx_hash);
+    }
     Ok(())
 }
 
@@ -253,10 +269,18 @@ async fn cmd_write_contract(paths: &Paths, args: WriteContractArgs) -> Result<()
         &args.function,
         &args.args,
         args.value_wei.as_deref(),
+        wallet::WaitOptions::from_flag(args.wait, args.timeout_secs),
         args.index,
     )
     .await?;
-    println!("{}", sent.tx_hash);
+    if sent.confirmed {
+        println!(
+            "{}",
+            serde_json::to_string(&sent).context("failed to render contract send result")?
+        );
+    } else {
+        println!("{}", sent.tx_hash);
+    }
     Ok(())
 }
 

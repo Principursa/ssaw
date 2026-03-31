@@ -18,6 +18,7 @@ Implemented today:
 - runtime ABI contract reads
 - runtime ABI contract writes
 - stdio JSON server with wallet methods
+- cross-process write locking for transaction submission
 
 Planned but not implemented yet:
 
@@ -101,6 +102,17 @@ cargo run -- send-transaction \
   --value-wei 1
 ```
 
+Wait for a receipt instead of returning only the transaction hash:
+
+```sh
+cargo run -- send-transaction \
+  --chain local \
+  --to 0x000000000000000000000000000000000000dead \
+  --value-wei 1 \
+  --wait \
+  --timeout-secs 60
+```
+
 Note:
 
 - a freshly initialized wallet will not be funded on Anvil by default
@@ -133,6 +145,20 @@ cat abi.json | cargo run -- write-contract \
   --arg 1
 ```
 
+Wait for a contract write receipt:
+
+```sh
+cat abi.json | cargo run -- write-contract \
+  --chain local \
+  --address 0xYourContract \
+  --function transfer \
+  --abi-stdin \
+  --arg 0x000000000000000000000000000000000000dead \
+  --arg 1 \
+  --wait \
+  --timeout-secs 60
+```
+
 Attach native value to a payable call:
 
 ```sh
@@ -150,6 +176,9 @@ Current behavior:
 - outputs are printed as JSON values
 - integers are rendered as decimal strings
 - byte values are rendered as `0x` hex strings
+- `send-transaction` and `write-contract` return only `tx_hash` by default
+- with `--wait`, they return JSON including confirmation state and receipt summary
+- write operations take an exclusive wallet lock, so concurrent processes serialize sends instead of racing
 
 ## Stdio Server
 
@@ -160,6 +189,8 @@ cargo run -- serve
 ```
 
 Each request is one JSON line on stdin. Each response is one JSON line on stdout.
+
+Within one `ssaw serve` process, requests are handled sequentially. Across multiple CLI/server processes sharing the same wallet, write operations are serialized by a wallet lock file at `~/.ssaw/wallet.lock`.
 
 Currently supported methods:
 
@@ -179,6 +210,10 @@ printf '%s\n' '{"id":1,"method":"get_address","params":{"index":0}}' | cargo run
 
 ```sh
 printf '%s\n' '{"id":2,"method":"send_transaction","params":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","index":0}}' | cargo run -- serve
+```
+
+```sh
+printf '%s\n' '{"id":2,"method":"send_transaction","params":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","index":0,"wait":true,"timeout_secs":60}}' | cargo run -- serve
 ```
 
 ```sh
