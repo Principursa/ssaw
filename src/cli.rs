@@ -74,7 +74,7 @@ struct SendTransactionArgs {
     index: u32,
 }
 
-pub fn run() -> Result<()> {
+pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::discover()?;
 
@@ -86,9 +86,9 @@ pub fn run() -> Result<()> {
         Command::ListChains => cmd_list_chains(&paths),
         Command::SignMessage(args) => cmd_sign_message(&paths, args),
         Command::SignTypedData(args) => cmd_sign_typed_data(&paths, args),
-        Command::SendTransaction(args) => cmd_send_transaction(&paths, args),
+        Command::SendTransaction(args) => cmd_send_transaction(&paths, args).await,
         Command::Doctor => cmd_doctor(&paths),
-        Command::Serve => cmd_serve(&paths),
+        Command::Serve => cmd_serve(&paths).await,
     }
 }
 
@@ -162,7 +162,7 @@ fn cmd_sign_typed_data(paths: &Paths, args: SignTypedDataArgs) -> Result<()> {
     Ok(())
 }
 
-fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Result<()> {
+async fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Result<()> {
     let selector = chain::ChainSelector::parse(&args.chain);
     let sent = wallet::send_transaction(
         paths,
@@ -171,7 +171,8 @@ fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Result<()> 
         &args.value_wei,
         args.data.as_deref(),
         args.index,
-    )?;
+    )
+    .await?;
     println!("{}", sent.tx_hash);
     Ok(())
 }
@@ -198,8 +199,8 @@ fn cmd_doctor(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn cmd_serve(paths: &Paths) -> Result<()> {
-    server::run(paths)
+async fn cmd_serve(paths: &Paths) -> Result<()> {
+    server::run(paths).await
 }
 
 fn exists_marker(path: &std::path::Path) -> &'static str {

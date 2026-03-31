@@ -61,7 +61,7 @@ struct Response {
     error: Option<String>,
 }
 
-pub fn run(paths: &Paths) -> Result<()> {
+pub async fn run(paths: &Paths) -> Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut output = stdout.lock();
@@ -73,7 +73,7 @@ pub fn run(paths: &Paths) -> Result<()> {
         }
 
         let reply = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => handle_request(paths, &request),
+            Ok(request) => handle_request(paths, &request).await,
             Err(error) => Response {
                 id: Value::Null,
                 result: None,
@@ -89,7 +89,7 @@ pub fn run(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-fn handle_request(paths: &Paths, request: &Request) -> Response {
+async fn handle_request(paths: &Paths, request: &Request) -> Response {
     let result = match request.method.as_str() {
         "get_address" => parse_params::<AddressParams>(&request.params)
             .and_then(|params| wallet::derive_address(paths, params.index).map(|address| json!({ "address": address }))),
@@ -106,18 +106,24 @@ fn handle_request(paths: &Paths, request: &Request) -> Response {
             wallet::sign_typed_data(paths, &typed_data, params.index)
                 .map(|signed| json!({ "address": signed.address, "signature": signed.signature }))
         }),
-        "send_transaction" => parse_params::<SendTransactionParams>(&request.params).and_then(|params| {
-            let selector = chain_selector_from_json(&params.chain)?;
-            wallet::send_transaction(
-                paths,
-                &selector,
-                &params.to,
-                &params.value_wei,
-                params.data.as_deref(),
-                params.index,
-            )
-            .map(|sent| json!({ "tx_hash": sent.tx_hash }))
-        }),
+        "send_transaction" => {
+            let params = parse_params::<SendTransactionParams>(&request.params);
+            match params.and_then(|params| {
+                chain_selector_from_json(&params.chain).map(|selector| (params, selector))
+            }) {
+                Ok((params, selector)) => wallet::send_transaction(
+                    paths,
+                    &selector,
+                    &params.to,
+                    &params.value_wei,
+                    params.data.as_deref(),
+                    params.index,
+                )
+                .await
+                .map(|sent| json!({ "tx_hash": sent.tx_hash })),
+                Err(error) => Err(error),
+            }
+        }
         _ => Err(anyhow::anyhow!("unknown method `{}`", request.method)),
     };
 
@@ -166,7 +172,9 @@ mod tests {
             params: json!({}),
         };
 
-        let response = handle_request(&paths, &request);
+        let response = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(handle_request(&paths, &request));
         assert!(response.error.unwrap().contains("unknown method"));
     }
 

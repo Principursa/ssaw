@@ -5,24 +5,23 @@ use std::path::Path;
 use std::str::FromStr;
 
 use age::secrecy::ExposeSecret;
+use alloy::{
+    network::TransactionBuilder,
+    primitives::{Address, Bytes, U256},
+    providers::{Provider, ProviderBuilder},
+    rpc::types::TransactionRequest,
+    signers::local::PrivateKeySigner,
+};
+use alloy_dyn_abi::eip712::TypedData;
+use alloy_signer::SignerSync;
+use alloy_signer_local::{coins_bip39::English, MnemonicBuilder};
 use anyhow::{bail, Context, Result};
 use bip39::{Language, Mnemonic};
-use coins_bip32::{path::DerivationPath, xkeys::XPriv};
-use ethers_core::types::transaction::eip2718::TypedTransaction;
-use ethers_core::types::transaction::eip712::{Eip712, TypedData};
-use ethers_core::types::{
-    Address, Bytes, NameOrAddress, Signature as EthereumSignature, TransactionRequest, H256, U256,
-};
-use hex::ToHex;
-use k256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use sha3::{Digest, Keccak256};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 use crate::chain::{self, ChainSelector};
 use crate::config::{write_file, Paths};
-use crate::rpc::RpcClient;
 
 const DEFAULT_ADDRESS_COUNT: u32 = 5;
 const MAX_ADDRESS_COUNT: u32 = 20;
@@ -81,7 +80,7 @@ pub fn import(paths: &Paths, phrase: String, passphrase: Option<String>) -> Resu
 
 pub fn derive_address(paths: &Paths, index: u32) -> Result<String> {
     let signer = signer_for_index(paths, index)?;
-    Ok(address_from_signing_key(&signer))
+    Ok(format!("{:#x}", signer.address()))
 }
 
 pub fn list_addresses(paths: &Paths, count: Option<u32>) -> Result<Vec<DerivedAddress>> {
@@ -95,12 +94,13 @@ pub fn list_addresses(paths: &Paths, count: Option<u32>) -> Result<Vec<DerivedAd
 
 pub fn sign_message(paths: &Paths, message: &str, index: u32) -> Result<SignatureOutput> {
     let signer = signer_for_index(paths, index)?;
-    let digest = ethereum_message_digest(message.as_bytes());
-    let signature = sign_digest(&signer, digest)?;
+    let signature = signer
+        .sign_message_sync(message.as_bytes())
+        .context("failed to sign message")?;
 
     Ok(SignatureOutput {
-        address: address_from_signing_key(&signer),
-        signature,
+        address: format!("{:#x}", signer.address()),
+        signature: signature.to_string(),
     })
 }
 
@@ -108,18 +108,17 @@ pub fn sign_typed_data(paths: &Paths, typed_data_json: &str, index: u32) -> Resu
     let signer = signer_for_index(paths, index)?;
     let typed_data: TypedData =
         serde_json::from_str(typed_data_json).context("failed to parse typed data JSON")?;
-    let digest = typed_data
-        .encode_eip712()
-        .context("failed to encode typed data as EIP-712")?;
-    let signature = sign_digest(&signer, digest)?;
+    let signature = signer
+        .sign_dynamic_typed_data_sync(&typed_data)
+        .context("failed to sign typed data")?;
 
     Ok(SignatureOutput {
-        address: address_from_signing_key(&signer),
-        signature,
+        address: format!("{:#x}", signer.address()),
+        signature: signature.to_string(),
     })
 }
 
-pub fn send_transaction(
+pub async fn send_transaction(
     paths: &Paths,
     selector: &ChainSelector,
     to: &str,
@@ -128,44 +127,29 @@ pub fn send_transaction(
     index: u32,
 ) -> Result<SentTransaction> {
     let chain = chain::resolve(paths, selector)?;
-    let rpc = RpcClient::new(chain.rpc_url.clone());
     let signer = signer_for_index(paths, index)?;
-    let from = parse_address(&address_from_signing_key(&signer))
-        .context("failed to parse local signer address")?;
-    let to = parse_address(to).context("failed to parse recipient address")?;
-    let value =
-        U256::from_dec_str(value_wei).context("failed to parse value_wei as decimal string")?;
+    let rpc_url = chain
+        .rpc_url
+        .parse()
+        .with_context(|| format!("invalid rpc url `{}`", chain.rpc_url))?;
+    let provider = ProviderBuilder::new().wallet(signer).connect_http(rpc_url);
 
-    let nonce: U256 = rpc.request("eth_getTransactionCount", json!([from, "pending"]))?;
-    let gas_price: U256 = rpc.request("eth_gasPrice", json!([]))?;
-
-    let mut tx = TransactionRequest::new()
-        .from(from)
-        .to(NameOrAddress::Address(to))
-        .value(value)
-        .nonce(nonce)
-        .gas_price(gas_price)
-        .chain_id(chain.chain_id);
+    let mut tx = TransactionRequest::default()
+        .with_to(parse_address(to)?)
+        .with_value(parse_u256_dec(value_wei)?)
+        .with_chain_id(chain.chain_id);
 
     if let Some(data) = data {
-        let bytes = parse_hex_bytes(data).context("failed to parse transaction data hex")?;
-        tx = tx.data(bytes);
+        tx = tx.with_input(parse_hex_bytes(data)?);
     }
 
-    let estimate: U256 = rpc.request("eth_estimateGas", json!([tx.clone()]))?;
-    tx = tx.gas(estimate);
-
-    let mut typed_tx = TypedTransaction::Legacy(tx);
-    typed_tx.set_chain_id(chain.chain_id);
-
-    let signature = sign_transaction(&signer, &typed_tx, chain.chain_id)?;
-    let tx_hash: H256 = rpc.request(
-        "eth_sendRawTransaction",
-        json!([format!("0x{}", hex::encode(typed_tx.rlp_signed(&signature)))])
-    )?;
+    let pending = provider
+        .send_transaction(tx)
+        .await
+        .context("failed to send transaction")?;
 
     Ok(SentTransaction {
-        tx_hash: format!("{tx_hash:#x}"),
+        tx_hash: format!("{:#x}", pending.tx_hash()),
     })
 }
 
@@ -209,26 +193,18 @@ pub fn read_secret_line(prompt: &str) -> Result<String> {
     Ok(value)
 }
 
-fn signer_for_index(paths: &Paths, index: u32) -> Result<SigningKey> {
+fn signer_for_index(paths: &Paths, index: u32) -> Result<PrivateKeySigner> {
     let payload = load_payload(paths)?;
-    let derivation_path = derivation_path(index)?;
-    let mnemonic = Mnemonic::parse_in_normalized(Language::English, &payload.mnemonic)
-        .context("stored mnemonic is not valid BIP-39 English")?;
+    let mut builder = MnemonicBuilder::<English>::default()
+        .phrase(payload.mnemonic)
+        .index(index)
+        .context("failed to apply mnemonic index")?;
 
-    let mut seed = match payload.passphrase {
-        Some(passphrase) => Zeroizing::new(mnemonic.to_seed(passphrase)),
-        None => Zeroizing::new(mnemonic.to_seed_normalized("")),
-    };
+    if let Some(passphrase) = payload.passphrase {
+        builder = builder.password(passphrase);
+    }
 
-    let xpriv = XPriv::root_from_seed(seed.as_slice(), None).context("failed to derive root key")?;
-    seed.as_mut_slice().zeroize();
-
-    let derived = xpriv
-        .derive_path(&derivation_path)
-        .context("failed to derive child key")?;
-    let derived_signer: &SigningKey = derived.as_ref();
-    let secret = derived_signer.to_bytes();
-    SigningKey::from_bytes(&secret).context("failed to build signing key")
+    builder.build().context("failed to derive signer from mnemonic")
 }
 
 fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> Result<()> {
@@ -299,55 +275,6 @@ fn normalize_phrase(phrase: &str) -> Result<String> {
     Ok(mnemonic.to_string())
 }
 
-fn derivation_path(index: u32) -> Result<DerivationPath> {
-    format!("m/44'/60'/0'/0/{index}")
-        .parse::<DerivationPath>()
-        .context("failed to parse derivation path")
-}
-
-fn address_from_signing_key(signing_key: &SigningKey) -> String {
-    let verify_key = signing_key.verifying_key();
-    let encoded = verify_key.to_encoded_point(false);
-    let public_key = encoded.as_bytes();
-    let digest = Keccak256::digest(&public_key[1..]);
-    format!("0x{}", hex::encode(&digest[12..]))
-}
-
-fn ethereum_message_digest(message: &[u8]) -> [u8; 32] {
-    let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
-    let mut hasher = Keccak256::new();
-    hasher.update(prefix.as_bytes());
-    hasher.update(message);
-    hasher.finalize().into()
-}
-
-fn sign_digest(signing_key: &SigningKey, digest: [u8; 32]) -> Result<String> {
-    let (signature, recovery_id) = signing_key
-        .sign_prehash_recoverable(&digest)
-        .context("failed to sign digest")?;
-    let mut encoded = [0u8; 65];
-    encoded[..64].copy_from_slice(signature.to_bytes().as_slice());
-    encoded[64] = recovery_id.to_byte() + 27;
-    Ok(format!("0x{}", encoded.encode_hex::<String>()))
-}
-
-fn sign_transaction(
-    signing_key: &SigningKey,
-    tx: &TypedTransaction,
-    chain_id: u64,
-) -> Result<EthereumSignature> {
-    let sighash = tx.sighash();
-    let (signature, recovery_id) = signing_key
-        .sign_prehash_recoverable(sighash.as_bytes())
-        .context("failed to sign transaction sighash")?;
-
-    let r = U256::from_big_endian(signature.r().to_bytes().as_slice());
-    let s = U256::from_big_endian(signature.s().to_bytes().as_slice());
-    let v = u64::from(recovery_id.to_byte()) + chain_id * 2 + 35;
-
-    Ok(EthereumSignature { r, s, v })
-}
-
 fn parse_address(value: &str) -> Result<Address> {
     value
         .parse::<Address>()
@@ -358,6 +285,10 @@ fn parse_hex_bytes(value: &str) -> Result<Bytes> {
     let trimmed = value.strip_prefix("0x").unwrap_or(value);
     let bytes = hex::decode(trimmed).with_context(|| format!("invalid hex data `{value}`"))?;
     Ok(Bytes::from(bytes))
+}
+
+fn parse_u256_dec(value: &str) -> Result<U256> {
+    U256::from_str_radix(value, 10).with_context(|| format!("invalid decimal U256 `{value}`"))
 }
 
 #[cfg(test)]
@@ -373,35 +304,24 @@ mod tests {
 
     #[test]
     fn derives_known_address() {
-        let mnemonic = Mnemonic::parse_in_normalized(
-            Language::English,
-            "test test test test test test test test test test test junk",
-        )
-        .expect("parse mnemonic");
-        let seed = mnemonic.to_seed_normalized("");
-        let xpriv = XPriv::root_from_seed(&seed, None).expect("derive root");
-        let derived = xpriv
-            .derive_path("m/44'/60'/0'/0/0")
-            .expect("derive child");
-        let address = address_from_signing_key(derived.as_ref());
-        assert_eq!(address, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        let signer = MnemonicBuilder::<English>::default()
+            .phrase("test test test test test test test test test test test junk")
+            .build()
+            .expect("build signer");
+        assert_eq!(format!("{:#x}", signer.address()), "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
     }
 
     #[test]
     fn signs_message_with_65_byte_hex_signature() {
-        let mnemonic = Mnemonic::parse_in_normalized(
-            Language::English,
-            "test test test test test test test test test test test junk",
-        )
-        .expect("parse mnemonic");
-        let seed = mnemonic.to_seed_normalized("");
-        let xpriv = XPriv::root_from_seed(&seed, None).expect("derive root");
-        let derived = xpriv
-            .derive_path("m/44'/60'/0'/0/0")
-            .expect("derive child");
-        let signature = sign_digest(derived.as_ref(), ethereum_message_digest(b"hello"))
-            .expect("sign message");
-        assert_eq!(signature.len(), 132);
+        let signer = MnemonicBuilder::<English>::default()
+            .phrase("test test test test test test test test test test test junk")
+            .build()
+            .expect("build signer");
+        let signature = signer
+            .sign_message_sync(b"hello")
+            .expect("sign message")
+            .to_string();
         assert!(signature.starts_with("0x"));
+        assert_eq!(signature.len(), 132);
     }
 }
