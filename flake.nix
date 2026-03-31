@@ -24,7 +24,7 @@
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rust
-            fenix.packages.${system}.rust-analyzer
+            pkgs.rust-analyzer
             pkgs.pkg-config
             pkgs.openssl
           ];
