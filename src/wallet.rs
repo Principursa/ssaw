@@ -1,20 +1,40 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::iter;
+use std::path::Path;
 use std::str::FromStr;
 
 use age::secrecy::ExposeSecret;
 use anyhow::{bail, Context, Result};
 use bip39::{Language, Mnemonic};
-use ethers_signers::{coins_bip39::English, MnemonicBuilder, Signer};
+use coins_bip32::{path::DerivationPath, xkeys::XPriv};
+use ethers_core::types::transaction::eip712::{Eip712, TypedData};
+use hex::ToHex;
+use k256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use sha3::{Digest, Keccak256};
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::config::{write_file, Paths};
+
+const DEFAULT_ADDRESS_COUNT: u32 = 5;
+const MAX_ADDRESS_COUNT: u32 = 20;
 
 #[derive(Debug, Clone)]
 pub struct WalletSummary {
     pub address: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DerivedAddress {
+    pub index: u32,
+    pub address: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SignatureOutput {
+    pub address: String,
+    pub signature: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -48,28 +68,49 @@ pub fn import(paths: &Paths, phrase: String, passphrase: Option<String>) -> Resu
 }
 
 pub fn derive_address(paths: &Paths, index: u32) -> Result<String> {
-    let payload = load_payload(paths)?;
-    let mut builder = MnemonicBuilder::<English>::default().phrase(payload.mnemonic.as_str());
-    if let Some(passphrase) = payload.passphrase.as_deref() {
-        builder = builder.password(passphrase);
-    }
+    let signer = signer_for_index(paths, index)?;
+    Ok(address_from_signing_key(&signer))
+}
 
-    let derivation_path = format!("m/44'/60'/0'/0/{index}");
-    let wallet = builder
-        .derivation_path(&derivation_path)
-        .context("failed to build derivation path")?
-        .build()
-        .context("failed to derive wallet from mnemonic")?;
+pub fn list_addresses(paths: &Paths, count: Option<u32>) -> Result<Vec<DerivedAddress>> {
+    let count = count.unwrap_or(DEFAULT_ADDRESS_COUNT).min(MAX_ADDRESS_COUNT);
+    (0..count)
+        .map(|index| {
+            derive_address(paths, index).map(|address| DerivedAddress { index, address })
+        })
+        .collect()
+}
 
-    Ok(format!("{:#x}", wallet.address()))
+pub fn sign_message(paths: &Paths, message: &str, index: u32) -> Result<SignatureOutput> {
+    let signer = signer_for_index(paths, index)?;
+    let digest = ethereum_message_digest(message.as_bytes());
+    let signature = sign_digest(&signer, digest)?;
+
+    Ok(SignatureOutput {
+        address: address_from_signing_key(&signer),
+        signature,
+    })
+}
+
+pub fn sign_typed_data(paths: &Paths, typed_data_json: &str, index: u32) -> Result<SignatureOutput> {
+    let signer = signer_for_index(paths, index)?;
+    let typed_data: TypedData =
+        serde_json::from_str(typed_data_json).context("failed to parse typed data JSON")?;
+    let digest = typed_data
+        .encode_eip712()
+        .context("failed to encode typed data as EIP-712")?;
+    let signature = sign_digest(&signer, digest)?;
+
+    Ok(SignatureOutput {
+        address: address_from_signing_key(&signer),
+        signature,
+    })
 }
 
 pub fn ensure_identity(paths: &Paths) -> Result<(std::path::PathBuf, String)> {
     let identity_path = paths.identity_file()?;
     if identity_path.exists() {
-        let public = load_identity(&identity_path)?
-            .to_public()
-            .to_string();
+        let public = load_identity(&identity_path)?.to_public().to_string();
         return Ok((identity_path, public));
     }
 
@@ -97,11 +138,35 @@ pub fn read_phrase_from_stdin() -> Result<String> {
 
 pub fn read_secret_line(prompt: &str) -> Result<String> {
     let mut stdout = std::io::stdout();
-    stdout.write_all(prompt.as_bytes()).context("failed to write prompt")?;
+    stdout
+        .write_all(prompt.as_bytes())
+        .context("failed to write prompt")?;
     stdout.flush().context("failed to flush prompt")?;
 
     let value = rpassword::read_password().context("failed to read secret input")?;
     Ok(value)
+}
+
+fn signer_for_index(paths: &Paths, index: u32) -> Result<SigningKey> {
+    let payload = load_payload(paths)?;
+    let derivation_path = derivation_path(index)?;
+    let mnemonic = Mnemonic::parse_in_normalized(Language::English, &payload.mnemonic)
+        .context("stored mnemonic is not valid BIP-39 English")?;
+
+    let mut seed = match payload.passphrase {
+        Some(passphrase) => Zeroizing::new(mnemonic.to_seed(passphrase)),
+        None => Zeroizing::new(mnemonic.to_seed_normalized("")),
+    };
+
+    let xpriv = XPriv::root_from_seed(seed.as_slice(), None).context("failed to derive root key")?;
+    seed.as_mut_slice().zeroize();
+
+    let derived = xpriv
+        .derive_path(&derivation_path)
+        .context("failed to derive child key")?;
+    let derived_signer: &SigningKey = derived.as_ref();
+    let secret = derived_signer.to_bytes();
+    SigningKey::from_bytes(&secret).context("failed to build signing key")
 }
 
 fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> Result<()> {
@@ -128,7 +193,9 @@ fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> 
         writer
             .write_all(body.as_bytes())
             .context("failed to encrypt seed payload")?;
-        writer.finish().context("failed to finalize seed payload")?;
+        writer
+            .finish()
+            .context("failed to finalize seed payload")?;
     }
 
     write_file(&paths.seed_file, encrypted)
@@ -154,7 +221,7 @@ fn load_payload(paths: &Paths) -> Result<SeedPayload> {
     Ok(payload)
 }
 
-fn load_identity(path: &std::path::Path) -> Result<age::x25519::Identity> {
+fn load_identity(path: &Path) -> Result<age::x25519::Identity> {
     let raw = Zeroizing::new(
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?,
     );
@@ -170,6 +237,38 @@ fn normalize_phrase(phrase: &str) -> Result<String> {
     Ok(mnemonic.to_string())
 }
 
+fn derivation_path(index: u32) -> Result<DerivationPath> {
+    format!("m/44'/60'/0'/0/{index}")
+        .parse::<DerivationPath>()
+        .context("failed to parse derivation path")
+}
+
+fn address_from_signing_key(signing_key: &SigningKey) -> String {
+    let verify_key = signing_key.verifying_key();
+    let encoded = verify_key.to_encoded_point(false);
+    let public_key = encoded.as_bytes();
+    let digest = Keccak256::digest(&public_key[1..]);
+    format!("0x{}", hex::encode(&digest[12..]))
+}
+
+fn ethereum_message_digest(message: &[u8]) -> [u8; 32] {
+    let prefix = format!("\x19Ethereum Signed Message:\n{}", message.len());
+    let mut hasher = Keccak256::new();
+    hasher.update(prefix.as_bytes());
+    hasher.update(message);
+    hasher.finalize().into()
+}
+
+fn sign_digest(signing_key: &SigningKey, digest: [u8; 32]) -> Result<String> {
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(&digest)
+        .context("failed to sign digest")?;
+    let mut encoded = [0u8; 65];
+    encoded[..64].copy_from_slice(signature.to_bytes().as_slice());
+    encoded[64] = recovery_id.to_byte() + 27;
+    Ok(format!("0x{}", encoded.encode_hex::<String>()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +278,39 @@ mod tests {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
         let normalized = normalize_phrase(phrase).expect("normalize phrase");
         assert_eq!(normalized, phrase);
+    }
+
+    #[test]
+    fn derives_known_address() {
+        let mnemonic = Mnemonic::parse_in_normalized(
+            Language::English,
+            "test test test test test test test test test test test junk",
+        )
+        .expect("parse mnemonic");
+        let seed = mnemonic.to_seed_normalized("");
+        let xpriv = XPriv::root_from_seed(&seed, None).expect("derive root");
+        let derived = xpriv
+            .derive_path("m/44'/60'/0'/0/0")
+            .expect("derive child");
+        let address = address_from_signing_key(derived.as_ref());
+        assert_eq!(address, "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+    }
+
+    #[test]
+    fn signs_message_with_65_byte_hex_signature() {
+        let mnemonic = Mnemonic::parse_in_normalized(
+            Language::English,
+            "test test test test test test test test test test test junk",
+        )
+        .expect("parse mnemonic");
+        let seed = mnemonic.to_seed_normalized("");
+        let xpriv = XPriv::root_from_seed(&seed, None).expect("derive root");
+        let derived = xpriv
+            .derive_path("m/44'/60'/0'/0/0")
+            .expect("derive child");
+        let signature = sign_digest(derived.as_ref(), ethereum_message_digest(b"hello"))
+            .expect("sign message");
+        assert_eq!(signature.len(), 132);
+        assert!(signature.starts_with("0x"));
     }
 }

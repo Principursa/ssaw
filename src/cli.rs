@@ -3,6 +3,7 @@ use clap::{Args, Parser, Subcommand};
 
 use crate::chain;
 use crate::config::Paths;
+use crate::server;
 use crate::wallet;
 
 #[derive(Debug, Parser)]
@@ -19,6 +20,8 @@ enum Command {
     Address(AddressArgs),
     AddChain(AddChainArgs),
     ListChains,
+    SignMessage(SignMessageArgs),
+    SignTypedData(SignTypedDataArgs),
     Doctor,
     Serve,
 }
@@ -43,6 +46,19 @@ struct AddChainArgs {
     rpc_url_stdin: bool,
 }
 
+#[derive(Debug, Args)]
+struct SignMessageArgs {
+    message: String,
+    #[arg(long, default_value_t = 0)]
+    index: u32,
+}
+
+#[derive(Debug, Args)]
+struct SignTypedDataArgs {
+    #[arg(long, default_value_t = 0)]
+    index: u32,
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::discover()?;
@@ -53,6 +69,8 @@ pub fn run() -> Result<()> {
         Command::Address(args) => cmd_address(&paths, args),
         Command::AddChain(args) => cmd_add_chain(&paths, args),
         Command::ListChains => cmd_list_chains(&paths),
+        Command::SignMessage(args) => cmd_sign_message(&paths, args),
+        Command::SignTypedData(args) => cmd_sign_typed_data(&paths, args),
         Command::Doctor => cmd_doctor(&paths),
         Command::Serve => cmd_serve(&paths),
     }
@@ -114,22 +132,44 @@ fn cmd_list_chains(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
+fn cmd_sign_message(paths: &Paths, args: SignMessageArgs) -> Result<()> {
+    let output = wallet::sign_message(paths, &args.message, args.index)?;
+    println!("{}", output.signature);
+    Ok(())
+}
+
+fn cmd_sign_typed_data(paths: &Paths, args: SignTypedDataArgs) -> Result<()> {
+    let typed_data_json =
+        wallet::read_phrase_from_stdin().context("failed to read typed data JSON from stdin")?;
+    let output = wallet::sign_typed_data(paths, &typed_data_json, args.index)?;
+    println!("{}", output.signature);
+    Ok(())
+}
+
 fn cmd_doctor(paths: &Paths) -> Result<()> {
     let identity = paths.identity_file()?;
     println!("state_dir\t{}", paths.state_dir.display());
     println!("config_dir\t{}", paths.config_dir.display());
-    println!("seed_file\t{}\t{}", paths.seed_file.display(), exists_marker(&paths.seed_file));
-    println!("chains_file\t{}\t{}", paths.chains_file.display(), exists_marker(&paths.chains_file));
-    println!("identity_file\t{}\t{}", identity.display(), exists_marker(&identity));
+    println!(
+        "seed_file\t{}\t{}",
+        paths.seed_file.display(),
+        exists_marker(&paths.seed_file)
+    );
+    println!(
+        "chains_file\t{}\t{}",
+        paths.chains_file.display(),
+        exists_marker(&paths.chains_file)
+    );
+    println!(
+        "identity_file\t{}\t{}",
+        identity.display(),
+        exists_marker(&identity)
+    );
     Ok(())
 }
 
 fn cmd_serve(paths: &Paths) -> Result<()> {
-    let address = wallet::derive_address(paths, 0)
-        .context("failed to load wallet before starting server")?;
-    println!("serve is not implemented yet");
-    println!("wallet ready: {address}");
-    Ok(())
+    server::run(paths)
 }
 
 fn exists_marker(path: &std::path::Path) -> &'static str {
