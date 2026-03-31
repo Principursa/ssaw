@@ -131,23 +131,34 @@ pub async fn run(paths: &Paths) -> Result<()> {
 }
 
 async fn handle_request(paths: &Paths, request: &Request) -> Response {
+    let paths = match request_paths(paths, &request.params) {
+        Ok(paths) => paths,
+        Err(error) => {
+            return Response {
+                id: request.id.clone(),
+                result: None,
+                error: Some(error.to_string()),
+            };
+        }
+    };
+
     let result = match request.method.as_str() {
         "get_address" => parse_params::<AddressParams>(&request.params).and_then(|params| {
             let target =
-                wallet::resolve_address_target(paths, params.index, params.alias.as_deref())?;
-            wallet::derive_address(paths, target.index)
+                wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
+            wallet::derive_address(&paths, target.index)
                 .map(|address| json!({ "address": address, "index": target.index, "alias": target.alias }))
         }),
         "list_addresses" => {
             parse_params::<ListAddressesParams>(&request.params).and_then(|params| {
-                wallet::list_addresses(paths, params.count)
+                wallet::list_addresses(&paths, params.count)
                     .map(|addresses| json!({ "addresses": addresses }))
             })
         }
         "sign_message" => parse_params::<SignMessageParams>(&request.params).and_then(|params| {
             let target =
-                wallet::resolve_address_target(paths, params.index, params.alias.as_deref())?;
-            wallet::sign_message(paths, &params.message, target.index).map(|signed| {
+                wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
+            wallet::sign_message(&paths, &params.message, target.index).map(|signed| {
                 json!({ "address": signed.address, "signature": signed.signature, "index": target.index, "alias": target.alias })
             })
         }),
@@ -156,8 +167,8 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
                 let typed_data = serde_json::to_string(&params.typed_data)
                     .context("failed to serialize typed data payload")?;
                 let target =
-                    wallet::resolve_address_target(paths, params.index, params.alias.as_deref())?;
-                wallet::sign_typed_data(paths, &typed_data, target.index).map(|signed| {
+                    wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
+                wallet::sign_typed_data(&paths, &typed_data, target.index).map(|signed| {
                     json!({ "address": signed.address, "signature": signed.signature, "index": target.index, "alias": target.alias })
                 })
             })
@@ -169,10 +180,10 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
             }) {
                 Ok((params, selector)) => {
                     let target =
-                        wallet::resolve_address_target(paths, params.index, params.alias.as_deref());
+                        wallet::resolve_address_target(&paths, params.index, params.alias.as_deref());
                     match target {
                         Ok(target) => wallet::send_transaction(
-                            paths,
+                            &paths,
                             &selector,
                             &params.to,
                             &params.value_wei,
@@ -198,7 +209,7 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
                         .context("failed to serialize contract ABI payload");
                     match abi_json {
                         Ok(abi_json) => wallet::read_contract(
-                            paths,
+                            &paths,
                             &selector,
                             &params.address,
                             &abi_json,
@@ -224,13 +235,13 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
                     match abi_json {
                         Ok(abi_json) => {
                             let target = wallet::resolve_address_target(
-                                paths,
+                                &paths,
                                 params.index,
                                 params.alias.as_deref(),
                             );
                             match target {
                                 Ok(target) => wallet::write_contract(
-                                    paths,
+                                    &paths,
                                     &selector,
                                     &params.address,
                                     &abi_json,
@@ -293,6 +304,14 @@ fn default_timeout_secs() -> u64 {
     60
 }
 
+fn request_paths(base_paths: &Paths, params: &Value) -> Result<Paths> {
+    match params.get("project") {
+        Some(Value::String(project_name)) => Paths::discover_with_project(Some(project_name)),
+        Some(_) => bail!("project must be a string"),
+        None => Ok(base_paths.clone()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,5 +341,12 @@ mod tests {
             numeric,
             crate::chain::ChainSelector::ChainId(84532)
         ));
+    }
+
+    #[test]
+    fn rejects_non_string_project_override() {
+        let paths = Paths::discover().expect("paths");
+        let error = request_paths(&paths, &json!({ "project": 1 })).expect_err("project error");
+        assert!(error.to_string().contains("project must be a string"));
     }
 }

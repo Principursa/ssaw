@@ -286,6 +286,8 @@ If you want a separate stdio wallet for a separate workstream, start `serve` wit
 cargo run -- --project dex serve
 ```
 
+Server requests may also include `"project": "<name>"` inside `params` to target a project explicitly without starting a separate process for each one.
+
 Currently supported methods:
 
 - `get_address`
@@ -302,6 +304,10 @@ Examples:
 
 ```sh
 printf '%s\n' '{"id":1,"method":"get_address","params":{"index":0}}' | cargo run -- serve
+```
+
+```sh
+printf '%s\n' '{"id":1,"method":"get_address","params":{"project":"dex","alias":"deployer"}}' | cargo run -- serve
 ```
 
 ```sh
