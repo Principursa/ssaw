@@ -22,6 +22,7 @@ enum Command {
     ListChains,
     SignMessage(SignMessageArgs),
     SignTypedData(SignTypedDataArgs),
+    SendTransaction(SendTransactionArgs),
     Doctor,
     Serve,
 }
@@ -59,6 +60,20 @@ struct SignTypedDataArgs {
     index: u32,
 }
 
+#[derive(Debug, Args)]
+struct SendTransactionArgs {
+    #[arg(long)]
+    chain: String,
+    #[arg(long)]
+    to: String,
+    #[arg(long)]
+    value_wei: String,
+    #[arg(long)]
+    data: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    index: u32,
+}
+
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::discover()?;
@@ -71,6 +86,7 @@ pub fn run() -> Result<()> {
         Command::ListChains => cmd_list_chains(&paths),
         Command::SignMessage(args) => cmd_sign_message(&paths, args),
         Command::SignTypedData(args) => cmd_sign_typed_data(&paths, args),
+        Command::SendTransaction(args) => cmd_send_transaction(&paths, args),
         Command::Doctor => cmd_doctor(&paths),
         Command::Serve => cmd_serve(&paths),
     }
@@ -143,6 +159,20 @@ fn cmd_sign_typed_data(paths: &Paths, args: SignTypedDataArgs) -> Result<()> {
         wallet::read_phrase_from_stdin().context("failed to read typed data JSON from stdin")?;
     let output = wallet::sign_typed_data(paths, &typed_data_json, args.index)?;
     println!("{}", output.signature);
+    Ok(())
+}
+
+fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Result<()> {
+    let selector = chain::ChainSelector::parse(&args.chain);
+    let sent = wallet::send_transaction(
+        paths,
+        &selector,
+        &args.to,
+        &args.value_wei,
+        args.data.as_deref(),
+        args.index,
+    )?;
+    println!("{}", sent.tx_hash);
     Ok(())
 }
 

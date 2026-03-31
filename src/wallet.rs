@@ -8,14 +8,21 @@ use age::secrecy::ExposeSecret;
 use anyhow::{bail, Context, Result};
 use bip39::{Language, Mnemonic};
 use coins_bip32::{path::DerivationPath, xkeys::XPriv};
+use ethers_core::types::transaction::eip2718::TypedTransaction;
 use ethers_core::types::transaction::eip712::{Eip712, TypedData};
+use ethers_core::types::{
+    Address, Bytes, NameOrAddress, Signature as EthereumSignature, TransactionRequest, H256, U256,
+};
 use hex::ToHex;
 use k256::ecdsa::SigningKey;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sha3::{Digest, Keccak256};
 use zeroize::{Zeroize, Zeroizing};
 
+use crate::chain::{self, ChainSelector};
 use crate::config::{write_file, Paths};
+use crate::rpc::RpcClient;
 
 const DEFAULT_ADDRESS_COUNT: u32 = 5;
 const MAX_ADDRESS_COUNT: u32 = 20;
@@ -35,6 +42,11 @@ pub struct DerivedAddress {
 pub struct SignatureOutput {
     pub address: String,
     pub signature: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SentTransaction {
+    pub tx_hash: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -104,6 +116,56 @@ pub fn sign_typed_data(paths: &Paths, typed_data_json: &str, index: u32) -> Resu
     Ok(SignatureOutput {
         address: address_from_signing_key(&signer),
         signature,
+    })
+}
+
+pub fn send_transaction(
+    paths: &Paths,
+    selector: &ChainSelector,
+    to: &str,
+    value_wei: &str,
+    data: Option<&str>,
+    index: u32,
+) -> Result<SentTransaction> {
+    let chain = chain::resolve(paths, selector)?;
+    let rpc = RpcClient::new(chain.rpc_url.clone());
+    let signer = signer_for_index(paths, index)?;
+    let from = parse_address(&address_from_signing_key(&signer))
+        .context("failed to parse local signer address")?;
+    let to = parse_address(to).context("failed to parse recipient address")?;
+    let value =
+        U256::from_dec_str(value_wei).context("failed to parse value_wei as decimal string")?;
+
+    let nonce: U256 = rpc.request("eth_getTransactionCount", json!([from, "pending"]))?;
+    let gas_price: U256 = rpc.request("eth_gasPrice", json!([]))?;
+
+    let mut tx = TransactionRequest::new()
+        .from(from)
+        .to(NameOrAddress::Address(to))
+        .value(value)
+        .nonce(nonce)
+        .gas_price(gas_price)
+        .chain_id(chain.chain_id);
+
+    if let Some(data) = data {
+        let bytes = parse_hex_bytes(data).context("failed to parse transaction data hex")?;
+        tx = tx.data(bytes);
+    }
+
+    let estimate: U256 = rpc.request("eth_estimateGas", json!([tx.clone()]))?;
+    tx = tx.gas(estimate);
+
+    let mut typed_tx = TypedTransaction::Legacy(tx);
+    typed_tx.set_chain_id(chain.chain_id);
+
+    let signature = sign_transaction(&signer, &typed_tx, chain.chain_id)?;
+    let tx_hash: H256 = rpc.request(
+        "eth_sendRawTransaction",
+        json!([format!("0x{}", hex::encode(typed_tx.rlp_signed(&signature)))])
+    )?;
+
+    Ok(SentTransaction {
+        tx_hash: format!("{tx_hash:#x}"),
     })
 }
 
@@ -267,6 +329,35 @@ fn sign_digest(signing_key: &SigningKey, digest: [u8; 32]) -> Result<String> {
     encoded[..64].copy_from_slice(signature.to_bytes().as_slice());
     encoded[64] = recovery_id.to_byte() + 27;
     Ok(format!("0x{}", encoded.encode_hex::<String>()))
+}
+
+fn sign_transaction(
+    signing_key: &SigningKey,
+    tx: &TypedTransaction,
+    chain_id: u64,
+) -> Result<EthereumSignature> {
+    let sighash = tx.sighash();
+    let (signature, recovery_id) = signing_key
+        .sign_prehash_recoverable(sighash.as_bytes())
+        .context("failed to sign transaction sighash")?;
+
+    let r = U256::from_big_endian(signature.r().to_bytes().as_slice());
+    let s = U256::from_big_endian(signature.s().to_bytes().as_slice());
+    let v = u64::from(recovery_id.to_byte()) + chain_id * 2 + 35;
+
+    Ok(EthereumSignature { r, s, v })
+}
+
+fn parse_address(value: &str) -> Result<Address> {
+    value
+        .parse::<Address>()
+        .with_context(|| format!("invalid address `{value}`"))
+}
+
+fn parse_hex_bytes(value: &str) -> Result<Bytes> {
+    let trimmed = value.strip_prefix("0x").unwrap_or(value);
+    let bytes = hex::decode(trimmed).with_context(|| format!("invalid hex data `{value}`"))?;
+    Ok(Bytes::from(bytes))
 }
 
 #[cfg(test)]

@@ -17,6 +17,12 @@ pub struct ChainConfig {
     pub chains: BTreeMap<String, ChainEntry>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChainSelector {
+    Name(String),
+    ChainId(u64),
+}
+
 pub fn load(paths: &Paths) -> Result<ChainConfig> {
     if !paths.chains_file.exists() {
         return Ok(ChainConfig::default());
@@ -47,6 +53,33 @@ pub fn add_chain(paths: &Paths, name: &str, chain_id: u64, rpc_url: String) -> R
     write_file(&paths.chains_file, body)
 }
 
+pub fn resolve(paths: &Paths, selector: &ChainSelector) -> Result<ChainEntry> {
+    let config = load(paths)?;
+
+    match selector {
+        ChainSelector::Name(name) => config
+            .chains
+            .get(name)
+            .cloned()
+            .with_context(|| format!("unknown chain `{name}`")),
+        ChainSelector::ChainId(chain_id) => config
+            .chains
+            .values()
+            .find(|entry| entry.chain_id == *chain_id)
+            .cloned()
+            .with_context(|| format!("unknown chain id `{chain_id}`")),
+    }
+}
+
+impl ChainSelector {
+    pub fn parse(value: &str) -> Self {
+        match value.parse::<u64>() {
+            Ok(chain_id) => Self::ChainId(chain_id),
+            Err(_) => Self::Name(value.to_owned()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -65,5 +98,11 @@ mod tests {
         let body = toml::to_string_pretty(&config).expect("serialize config");
         assert!(body.contains("[chains.local]"));
         assert!(body.contains("chain_id = 31337"));
+    }
+
+    #[test]
+    fn parses_chain_selector() {
+        assert_eq!(ChainSelector::parse("base-sepolia"), ChainSelector::Name("base-sepolia".to_owned()));
+        assert_eq!(ChainSelector::parse("84532"), ChainSelector::ChainId(84532));
     }
 }

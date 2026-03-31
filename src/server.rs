@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Write};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -37,6 +37,17 @@ struct SignMessageParams {
 #[derive(Debug, Deserialize)]
 struct SignTypedDataParams {
     typed_data: Value,
+    #[serde(default)]
+    index: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct SendTransactionParams {
+    to: String,
+    value_wei: String,
+    chain: Value,
+    #[serde(default)]
+    data: Option<String>,
     #[serde(default)]
     index: u32,
 }
@@ -95,6 +106,18 @@ fn handle_request(paths: &Paths, request: &Request) -> Response {
             wallet::sign_typed_data(paths, &typed_data, params.index)
                 .map(|signed| json!({ "address": signed.address, "signature": signed.signature }))
         }),
+        "send_transaction" => parse_params::<SendTransactionParams>(&request.params).and_then(|params| {
+            let selector = chain_selector_from_json(&params.chain)?;
+            wallet::send_transaction(
+                paths,
+                &selector,
+                &params.to,
+                &params.value_wei,
+                params.data.as_deref(),
+                params.index,
+            )
+            .map(|sent| json!({ "tx_hash": sent.tx_hash }))
+        }),
         _ => Err(anyhow::anyhow!("unknown method `{}`", request.method)),
     };
 
@@ -119,6 +142,17 @@ where
     serde_json::from_value(params.clone()).context("invalid params")
 }
 
+fn chain_selector_from_json(value: &Value) -> Result<crate::chain::ChainSelector> {
+    match value {
+        Value::String(name) => Ok(crate::chain::ChainSelector::parse(name)),
+        Value::Number(number) => number
+            .as_u64()
+            .map(crate::chain::ChainSelector::ChainId)
+            .context("chain number must be an unsigned integer"),
+        _ => bail!("chain must be a string name or numeric chain id"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +168,14 @@ mod tests {
 
         let response = handle_request(&paths, &request);
         assert!(response.error.unwrap().contains("unknown method"));
+    }
+
+    #[test]
+    fn parses_chain_selector_from_json() {
+        let named = chain_selector_from_json(&json!("base-sepolia")).expect("named selector");
+        assert!(matches!(named, crate::chain::ChainSelector::Name(_)));
+
+        let numeric = chain_selector_from_json(&json!(84532)).expect("numeric selector");
+        assert!(matches!(numeric, crate::chain::ChainSelector::ChainId(84532)));
     }
 }
