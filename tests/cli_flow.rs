@@ -63,7 +63,7 @@ fn project_and_alias_flow() {
 }
 
 #[test]
-fn serve_supports_project_override_and_alias_metadata() {
+fn serve_supports_mcp_tools_and_alias_metadata() {
     let home = TempDir::new().expect("temp home");
 
     let init = ssaw_cmd(home.path())
@@ -89,9 +89,7 @@ fn serve_supports_project_override_and_alias_metadata() {
     );
 
     let output = ssaw_cmd(home.path())
-        .args([
-            "serve",
-        ])
+        .args(["serve"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -102,9 +100,23 @@ fn serve_supports_project_override_and_alias_metadata() {
             let mut stdin = child.stdin.take().expect("stdin");
             stdin
                 .write_all(
-                    br#"{"id":1,"method":"get_address","params":{"project":"dex","alias":"deployer"}}"#,
+                    br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}"#,
                 )
-                .expect("write request");
+                .expect("write initialize");
+            stdin.write_all(b"\n").expect("write newline");
+            stdin
+                .write_all(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+                .expect("write initialized notification");
+            stdin.write_all(b"\n").expect("write newline");
+            stdin
+                .write_all(br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#)
+                .expect("write tools/list");
+            stdin.write_all(b"\n").expect("write newline");
+            stdin
+                .write_all(
+                    br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_address","arguments":{"project":"dex","alias":"deployer"}}}"#,
+                )
+                .expect("write tools/call");
             stdin.write_all(b"\n").expect("write newline");
             drop(stdin);
             child.wait_with_output().expect("wait output")
@@ -116,15 +128,30 @@ fn serve_supports_project_override_and_alias_metadata() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let response: Value = serde_json::from_slice(&output.stdout).expect("parse response");
-    assert_eq!(response["id"], 1);
-    assert_eq!(response["result"]["alias"], "deployer");
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0]["id"], 1);
     assert_eq!(
-        response["result"]["aliases"],
-        serde_json::json!(["deployer"])
+        responses[0]["result"]["capabilities"]["tools"]["listChanged"],
+        false
     );
+    assert_eq!(responses[1]["id"], 2);
     assert!(
-        response["result"]["address"]
+        responses[1]["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .any(|tool| tool["name"] == "get_address")
+    );
+    assert_eq!(responses[2]["id"], 3);
+    let structured = &responses[2]["result"]["structuredContent"];
+    assert_eq!(structured["alias"], "deployer");
+    assert_eq!(structured["aliases"], serde_json::json!(["deployer"]));
+    assert!(
+        structured["address"]
             .as_str()
             .expect("address")
             .starts_with("0x")

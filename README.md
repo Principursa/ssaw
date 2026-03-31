@@ -2,7 +2,7 @@
 
 Shark's Secure Agent Wallet.
 
-SSAW is a local Ethereum wallet intended for agent use. It keeps wallet material encrypted on disk, exposes a small CLI, and can run a line-oriented JSON stdio server for agent tooling.
+SSAW is a local Ethereum wallet intended for agent use. It keeps wallet material encrypted on disk, exposes a small CLI, and can run a stdio MCP server for agent tooling.
 
 ## Current Status
 
@@ -17,7 +17,7 @@ Implemented today:
 - native transaction sending
 - runtime ABI contract reads
 - runtime ABI contract writes
-- stdio JSON server with wallet methods
+- stdio MCP server with wallet tools
 - cross-process write locking for transaction submission
 
 Planned but not implemented yet:
@@ -275,7 +275,7 @@ Current behavior:
 - with `--wait`, they return JSON including confirmation state and receipt summary
 - write operations take an exclusive wallet lock, so concurrent processes serialize sends instead of racing
 
-## Stdio Server
+## MCP Server
 
 Run the server:
 
@@ -283,7 +283,7 @@ Run the server:
 cargo run -- serve
 ```
 
-Each request is one JSON line on stdin. Each response is one JSON line on stdout.
+`ssaw serve` now speaks MCP over stdio using JSON-RPC 2.0 messages, one JSON message per line.
 
 Within one `ssaw serve` process, requests are handled sequentially. Across multiple CLI/server processes sharing the same wallet, write operations are serialized by a project-local wallet lock file:
 
@@ -296,9 +296,17 @@ If you want a separate stdio wallet for a separate workstream, start `serve` wit
 cargo run -- --project dex serve
 ```
 
-Server requests may also include `"project": "<name>"` inside `params` to target a project explicitly without starting a separate process for each one.
+Tool arguments may include `"project": "<name>"` to target a project explicitly without starting a separate process for each one.
 
-Currently supported methods:
+Current MCP methods:
+
+- `initialize`
+- `notifications/initialized`
+- `ping`
+- `tools/list`
+- `tools/call`
+
+Current wallet tools:
 
 - `get_address`
 - `list_addresses`
@@ -310,26 +318,44 @@ Currently supported methods:
 
 Address-targeting methods also accept `alias` in place of `index` for project-local alias lookup.
 
-Examples:
+Minimal handshake example:
 
 ```sh
-printf '%s\n' '{"id":1,"method":"get_address","params":{"index":0}}' | cargo run -- serve
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  | cargo run -- serve
 ```
 
-```sh
-printf '%s\n' '{"id":1,"method":"get_address","params":{"project":"dex","alias":"deployer"}}' | cargo run -- serve
-```
+Call `get_address` through MCP:
 
 ```sh
-printf '%s\n' '{"id":2,"method":"send_transaction","params":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","index":0}}' | cargo run -- serve
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_address","arguments":{"project":"dex","alias":"deployer"}}}' \
+  | cargo run -- serve
 ```
 
-```sh
-printf '%s\n' '{"id":2,"method":"send_transaction","params":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","index":0,"wait":true,"timeout_secs":60}}' | cargo run -- serve
-```
+Call `send_transaction` through MCP:
 
 ```sh
-printf '%s\n' '{"id":3,"method":"read_contract","params":{"chain":"local","address":"0xYourContract","function":"balanceOf","abi":[{"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"owner","type":"address"}],"outputs":[{"name":"","type":"uint256"}]}],"args":["0x000000000000000000000000000000000000dead"]}}' | cargo run -- serve
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_transaction","arguments":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","index":0}}}' \
+  | cargo run -- serve
+```
+
+Call `read_contract` through MCP:
+
+```sh
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_contract","arguments":{"chain":"local","address":"0xYourContract","function":"balanceOf","abi":[{"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"owner","type":"address"}],"outputs":[{"name":"","type":"uint256"}]}],"args":["0x000000000000000000000000000000000000dead"]}}}' \
+  | cargo run -- serve
 ```
 
 ## Testing
