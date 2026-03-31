@@ -1,8 +1,8 @@
 use std::io::{self, BufRead, Write};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::Paths;
 use crate::wallet;
@@ -52,6 +52,30 @@ struct SendTransactionParams {
     index: u32,
 }
 
+#[derive(Debug, Deserialize)]
+struct ReadContractParams {
+    address: String,
+    chain: Value,
+    function: String,
+    abi: Value,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WriteContractParams {
+    address: String,
+    chain: Value,
+    function: String,
+    abi: Value,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    value_wei: Option<String>,
+    #[serde(default)]
+    index: u32,
+}
+
 #[derive(Debug, Serialize)]
 struct Response {
     id: Value,
@@ -91,21 +115,28 @@ pub async fn run(paths: &Paths) -> Result<()> {
 
 async fn handle_request(paths: &Paths, request: &Request) -> Response {
     let result = match request.method.as_str() {
-        "get_address" => parse_params::<AddressParams>(&request.params)
-            .and_then(|params| wallet::derive_address(paths, params.index).map(|address| json!({ "address": address }))),
-        "list_addresses" => parse_params::<ListAddressesParams>(&request.params).and_then(|params| {
-            wallet::list_addresses(paths, params.count).map(|addresses| json!({ "addresses": addresses }))
+        "get_address" => parse_params::<AddressParams>(&request.params).and_then(|params| {
+            wallet::derive_address(paths, params.index).map(|address| json!({ "address": address }))
         }),
+        "list_addresses" => {
+            parse_params::<ListAddressesParams>(&request.params).and_then(|params| {
+                wallet::list_addresses(paths, params.count)
+                    .map(|addresses| json!({ "addresses": addresses }))
+            })
+        }
         "sign_message" => parse_params::<SignMessageParams>(&request.params).and_then(|params| {
             wallet::sign_message(paths, &params.message, params.index)
                 .map(|signed| json!({ "address": signed.address, "signature": signed.signature }))
         }),
-        "sign_typed_data" => parse_params::<SignTypedDataParams>(&request.params).and_then(|params| {
-            let typed_data = serde_json::to_string(&params.typed_data)
-                .context("failed to serialize typed data payload")?;
-            wallet::sign_typed_data(paths, &typed_data, params.index)
-                .map(|signed| json!({ "address": signed.address, "signature": signed.signature }))
-        }),
+        "sign_typed_data" => {
+            parse_params::<SignTypedDataParams>(&request.params).and_then(|params| {
+                let typed_data = serde_json::to_string(&params.typed_data)
+                    .context("failed to serialize typed data payload")?;
+                wallet::sign_typed_data(paths, &typed_data, params.index).map(
+                    |signed| json!({ "address": signed.address, "signature": signed.signature }),
+                )
+            })
+        }
         "send_transaction" => {
             let params = parse_params::<SendTransactionParams>(&request.params);
             match params.and_then(|params| {
@@ -121,6 +152,58 @@ async fn handle_request(paths: &Paths, request: &Request) -> Response {
                 )
                 .await
                 .map(|sent| json!({ "tx_hash": sent.tx_hash })),
+                Err(error) => Err(error),
+            }
+        }
+        "read_contract" => {
+            let params = parse_params::<ReadContractParams>(&request.params);
+            match params.and_then(|params| {
+                chain_selector_from_json(&params.chain).map(|selector| (params, selector))
+            }) {
+                Ok((params, selector)) => {
+                    let abi_json = serde_json::to_string(&params.abi)
+                        .context("failed to serialize contract ABI payload");
+                    match abi_json {
+                        Ok(abi_json) => wallet::read_contract(
+                            paths,
+                            &selector,
+                            &params.address,
+                            &abi_json,
+                            &params.function,
+                            &params.args,
+                        )
+                        .await
+                        .map(|output| json!({ "outputs": output.outputs })),
+                        Err(error) => Err(error),
+                    }
+                }
+                Err(error) => Err(error),
+            }
+        }
+        "write_contract" => {
+            let params = parse_params::<WriteContractParams>(&request.params);
+            match params.and_then(|params| {
+                chain_selector_from_json(&params.chain).map(|selector| (params, selector))
+            }) {
+                Ok((params, selector)) => {
+                    let abi_json = serde_json::to_string(&params.abi)
+                        .context("failed to serialize contract ABI payload");
+                    match abi_json {
+                        Ok(abi_json) => wallet::write_contract(
+                            paths,
+                            &selector,
+                            &params.address,
+                            &abi_json,
+                            &params.function,
+                            &params.args,
+                            params.value_wei.as_deref(),
+                            params.index,
+                        )
+                        .await
+                        .map(|sent| json!({ "tx_hash": sent.tx_hash })),
+                        Err(error) => Err(error),
+                    }
+                }
                 Err(error) => Err(error),
             }
         }
@@ -184,6 +267,9 @@ mod tests {
         assert!(matches!(named, crate::chain::ChainSelector::Name(_)));
 
         let numeric = chain_selector_from_json(&json!(84532)).expect("numeric selector");
-        assert!(matches!(numeric, crate::chain::ChainSelector::ChainId(84532)));
+        assert!(matches!(
+            numeric,
+            crate::chain::ChainSelector::ChainId(84532)
+        ));
     }
 }

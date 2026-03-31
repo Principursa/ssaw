@@ -1,10 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{write_file, Paths};
+use crate::config::{Paths, write_file};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ChainEntry {
@@ -102,7 +102,10 @@ mod tests {
 
     #[test]
     fn parses_chain_selector() {
-        assert_eq!(ChainSelector::parse("base-sepolia"), ChainSelector::Name("base-sepolia".to_owned()));
+        assert_eq!(
+            ChainSelector::parse("base-sepolia"),
+            ChainSelector::Name("base-sepolia".to_owned())
+        );
         assert_eq!(ChainSelector::parse("84532"), ChainSelector::ChainId(84532));
     }
 }

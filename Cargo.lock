@@ -4081,7 +4081,9 @@ version = "0.1.0"
 dependencies = [
  "age",
  "alloy",
+ "alloy-contract",
  "alloy-dyn-abi",
+ "alloy-json-abi",
  "alloy-signer",
  "alloy-signer-local",
  "anyhow",

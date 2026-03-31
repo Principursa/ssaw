@@ -12,16 +12,20 @@ use alloy::{
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
 };
+use alloy_contract::Interface;
 use alloy_dyn_abi::eip712::TypedData;
+use alloy_dyn_abi::{DynSolValue, Specifier};
+use alloy_json_abi::JsonAbi;
 use alloy_signer::SignerSync;
-use alloy_signer_local::{coins_bip39::English, MnemonicBuilder};
-use anyhow::{bail, Context, Result};
+use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+use anyhow::{Context, Result, bail};
 use bip39::{Language, Mnemonic};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
 use crate::chain::{self, ChainSelector};
-use crate::config::{write_file, Paths};
+use crate::config::{Paths, write_file};
 
 const DEFAULT_ADDRESS_COUNT: u32 = 5;
 const MAX_ADDRESS_COUNT: u32 = 20;
@@ -48,6 +52,11 @@ pub struct SentTransaction {
     pub tx_hash: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct ContractReadOutput {
+    pub outputs: Value,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct SeedPayload {
     mnemonic: String,
@@ -62,8 +71,8 @@ pub fn init(paths: &Paths) -> Result<(String, WalletSummary)> {
         );
     }
 
-    let mnemonic = Mnemonic::generate_in(Language::English, 24)
-        .context("failed to generate mnemonic")?;
+    let mnemonic =
+        Mnemonic::generate_in(Language::English, 24).context("failed to generate mnemonic")?;
     let phrase = mnemonic.to_string();
     persist_phrase(paths, phrase.clone(), None)?;
     let address = derive_address(paths, 0)?;
@@ -84,11 +93,11 @@ pub fn derive_address(paths: &Paths, index: u32) -> Result<String> {
 }
 
 pub fn list_addresses(paths: &Paths, count: Option<u32>) -> Result<Vec<DerivedAddress>> {
-    let count = count.unwrap_or(DEFAULT_ADDRESS_COUNT).min(MAX_ADDRESS_COUNT);
+    let count = count
+        .unwrap_or(DEFAULT_ADDRESS_COUNT)
+        .min(MAX_ADDRESS_COUNT);
     (0..count)
-        .map(|index| {
-            derive_address(paths, index).map(|address| DerivedAddress { index, address })
-        })
+        .map(|index| derive_address(paths, index).map(|address| DerivedAddress { index, address }))
         .collect()
 }
 
@@ -104,7 +113,11 @@ pub fn sign_message(paths: &Paths, message: &str, index: u32) -> Result<Signatur
     })
 }
 
-pub fn sign_typed_data(paths: &Paths, typed_data_json: &str, index: u32) -> Result<SignatureOutput> {
+pub fn sign_typed_data(
+    paths: &Paths,
+    typed_data_json: &str,
+    index: u32,
+) -> Result<SignatureOutput> {
     let signer = signer_for_index(paths, index)?;
     let typed_data: TypedData =
         serde_json::from_str(typed_data_json).context("failed to parse typed data JSON")?;
@@ -147,6 +160,75 @@ pub async fn send_transaction(
         .send_transaction(tx)
         .await
         .context("failed to send transaction")?;
+
+    Ok(SentTransaction {
+        tx_hash: format!("{:#x}", pending.tx_hash()),
+    })
+}
+
+pub async fn read_contract(
+    paths: &Paths,
+    selector: &ChainSelector,
+    address: &str,
+    abi_json: &str,
+    function: &str,
+    args: &[String],
+) -> Result<ContractReadOutput> {
+    let chain = chain::resolve(paths, selector)?;
+    let rpc_url = chain
+        .rpc_url
+        .parse()
+        .with_context(|| format!("invalid rpc url `{}`", chain.rpc_url))?;
+    let provider = ProviderBuilder::new().connect_http(rpc_url);
+    let interface = parse_interface(abi_json)?;
+    let contract =
+        interface.connect::<_, alloy::network::Ethereum>(parse_address(address)?, provider);
+    let values = parse_contract_args(contract.abi(), function, args)?;
+    let outputs = contract
+        .function(function, &values)
+        .with_context(|| format!("failed to prepare function `{function}`"))?
+        .call()
+        .await
+        .with_context(|| format!("failed to call function `{function}`"))?;
+
+    Ok(ContractReadOutput {
+        outputs: dyn_values_to_json(&outputs),
+    })
+}
+
+pub async fn write_contract(
+    paths: &Paths,
+    selector: &ChainSelector,
+    address: &str,
+    abi_json: &str,
+    function: &str,
+    args: &[String],
+    value_wei: Option<&str>,
+    index: u32,
+) -> Result<SentTransaction> {
+    let chain = chain::resolve(paths, selector)?;
+    let signer = signer_for_index(paths, index)?;
+    let rpc_url = chain
+        .rpc_url
+        .parse()
+        .with_context(|| format!("invalid rpc url `{}`", chain.rpc_url))?;
+    let provider = ProviderBuilder::new().wallet(signer).connect_http(rpc_url);
+    let interface = parse_interface(abi_json)?;
+    let contract =
+        interface.connect::<_, alloy::network::Ethereum>(parse_address(address)?, provider);
+    let values = parse_contract_args(contract.abi(), function, args)?;
+    let mut call = contract
+        .function(function, &values)
+        .with_context(|| format!("failed to prepare function `{function}`"))?;
+
+    if let Some(value_wei) = value_wei {
+        call = call.value(parse_u256_dec(value_wei)?);
+    }
+
+    let pending = call
+        .send()
+        .await
+        .with_context(|| format!("failed to send contract call `{function}`"))?;
 
     Ok(SentTransaction {
         tx_hash: format!("{:#x}", pending.tx_hash()),
@@ -204,7 +286,9 @@ fn signer_for_index(paths: &Paths, index: u32) -> Result<PrivateKeySigner> {
         builder = builder.password(passphrase);
     }
 
-    builder.build().context("failed to derive signer from mnemonic")
+    builder
+        .build()
+        .context("failed to derive signer from mnemonic")
 }
 
 fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> Result<()> {
@@ -217,7 +301,10 @@ fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> 
         load_identity(&identity_path)?
     };
 
-    let payload = SeedPayload { mnemonic: phrase, passphrase };
+    let payload = SeedPayload {
+        mnemonic: phrase,
+        passphrase,
+    };
     let body = toml::to_string(&payload).context("failed to serialize seed payload")?;
     let recipient = identity.to_public();
     let encryptor = age::Encryptor::with_recipients(iter::once(&recipient as &dyn age::Recipient))
@@ -231,9 +318,7 @@ fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> 
         writer
             .write_all(body.as_bytes())
             .context("failed to encrypt seed payload")?;
-        writer
-            .finish()
-            .context("failed to finalize seed payload")?;
+        writer.finish().context("failed to finalize seed payload")?;
     }
 
     write_file(&paths.seed_file, encrypted)
@@ -291,6 +376,72 @@ fn parse_u256_dec(value: &str) -> Result<U256> {
     U256::from_str_radix(value, 10).with_context(|| format!("invalid decimal U256 `{value}`"))
 }
 
+fn parse_interface(abi_json: &str) -> Result<Interface> {
+    let abi: JsonAbi = serde_json::from_str(abi_json).context("failed to parse ABI JSON")?;
+    Ok(Interface::new(abi))
+}
+
+fn parse_contract_args(abi: &JsonAbi, function: &str, args: &[String]) -> Result<Vec<DynSolValue>> {
+    let item = abi
+        .function(function)
+        .and_then(|items| items.first())
+        .with_context(|| format!("function `{function}` not found in ABI"))?;
+
+    if item.inputs.len() != args.len() {
+        bail!(
+            "function `{function}` expects {} argument(s), got {}",
+            item.inputs.len(),
+            args.len()
+        );
+    }
+
+    item.inputs
+        .iter()
+        .zip(args)
+        .map(|(param, arg)| {
+            let ty = param
+                .resolve()
+                .context("failed to resolve function argument type")?;
+            ty.coerce_str(arg)
+                .with_context(|| format!("failed to parse argument `{arg}` as `{}`", param.ty))
+        })
+        .collect()
+}
+
+fn dyn_values_to_json(values: &[DynSolValue]) -> Value {
+    Value::Array(values.iter().map(dyn_value_to_json).collect())
+}
+
+fn dyn_value_to_json(value: &DynSolValue) -> Value {
+    match value {
+        DynSolValue::Bool(inner) => Value::Bool(*inner),
+        DynSolValue::Int(inner, _) => Value::String(inner.to_string()),
+        DynSolValue::Uint(inner, _) => Value::String(inner.to_string()),
+        DynSolValue::FixedBytes(inner, size) => {
+            Value::String(format!("0x{}", hex::encode(&inner[..*size])))
+        }
+        DynSolValue::Address(inner) => Value::String(format!("{:#x}", inner)),
+        DynSolValue::Function(inner) => Value::String(format!("{:#x}", inner)),
+        DynSolValue::Bytes(inner) => Value::String(format!("0x{}", hex::encode(inner))),
+        DynSolValue::String(inner) => Value::String(inner.clone()),
+        DynSolValue::Array(inner) | DynSolValue::FixedArray(inner) | DynSolValue::Tuple(inner) => {
+            Value::Array(inner.iter().map(dyn_value_to_json).collect())
+        }
+        DynSolValue::CustomStruct {
+            name,
+            prop_names,
+            tuple,
+        } => {
+            let mut object = Map::new();
+            object.insert("_type".to_owned(), Value::String(name.clone()));
+            for (prop_name, prop_value) in prop_names.iter().zip(tuple.iter()) {
+                object.insert(prop_name.clone(), dyn_value_to_json(prop_value));
+            }
+            Value::Object(object)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -308,7 +459,10 @@ mod tests {
             .phrase("test test test test test test test test test test test junk")
             .build()
             .expect("build signer");
-        assert_eq!(format!("{:#x}", signer.address()), "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266");
+        assert_eq!(
+            format!("{:#x}", signer.address()),
+            "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
+        );
     }
 
     #[test]
@@ -323,5 +477,58 @@ mod tests {
             .to_string();
         assert!(signature.starts_with("0x"));
         assert_eq!(signature.len(), 132);
+    }
+
+    #[test]
+    fn parses_contract_args_from_strings() {
+        let abi: JsonAbi = serde_json::from_str(
+            r#"[{"type":"function","name":"transfer","inputs":[{"name":"to","type":"address"},{"name":"amount","type":"uint256"}],"outputs":[]}]"#,
+        )
+        .expect("abi");
+
+        let args = parse_contract_args(
+            &abi,
+            "transfer",
+            &[
+                "0x000000000000000000000000000000000000dead".to_owned(),
+                "42".to_owned(),
+            ],
+        )
+        .expect("args");
+
+        assert_eq!(args.len(), 2);
+        assert_eq!(
+            dyn_values_to_json(&args),
+            Value::Array(vec![
+                Value::String("0x000000000000000000000000000000000000dead".to_owned()),
+                Value::String("42".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn renders_dynamic_values_as_json() {
+        let values = vec![
+            DynSolValue::Bool(true),
+            DynSolValue::Uint(U256::from(7u8), 256),
+            DynSolValue::Tuple(vec![
+                DynSolValue::String("hello".to_owned()),
+                DynSolValue::Address(
+                    parse_address("0x000000000000000000000000000000000000dead").expect("address"),
+                ),
+            ]),
+        ];
+
+        assert_eq!(
+            dyn_values_to_json(&values),
+            Value::Array(vec![
+                Value::Bool(true),
+                Value::String("7".to_owned()),
+                Value::Array(vec![
+                    Value::String("hello".to_owned()),
+                    Value::String("0x000000000000000000000000000000000000dead".to_owned()),
+                ]),
+            ])
+        );
     }
 }

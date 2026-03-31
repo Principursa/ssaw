@@ -56,7 +56,9 @@ impl Paths {
 
     pub fn identity_file(&self) -> Result<PathBuf> {
         let config = self.load_config()?;
-        Ok(config.identity_file.unwrap_or_else(|| self.default_identity_file.clone()))
+        Ok(config
+            .identity_file
+            .unwrap_or_else(|| self.default_identity_file.clone()))
     }
 
     pub fn write_config(&self, config: &AppConfig) -> Result<()> {

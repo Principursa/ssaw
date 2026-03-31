@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Parser, Subcommand};
 
 use crate::chain;
@@ -23,6 +23,8 @@ enum Command {
     SignMessage(SignMessageArgs),
     SignTypedData(SignTypedDataArgs),
     SendTransaction(SendTransactionArgs),
+    ReadContract(ReadContractArgs),
+    WriteContract(WriteContractArgs),
     Doctor,
     Serve,
 }
@@ -74,6 +76,38 @@ struct SendTransactionArgs {
     index: u32,
 }
 
+#[derive(Debug, Args)]
+struct ReadContractArgs {
+    #[arg(long)]
+    chain: String,
+    #[arg(long)]
+    address: String,
+    #[arg(long)]
+    function: String,
+    #[arg(long, default_value_t = false)]
+    abi_stdin: bool,
+    #[arg(long = "arg")]
+    args: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct WriteContractArgs {
+    #[arg(long)]
+    chain: String,
+    #[arg(long)]
+    address: String,
+    #[arg(long)]
+    function: String,
+    #[arg(long, default_value_t = false)]
+    abi_stdin: bool,
+    #[arg(long = "arg")]
+    args: Vec<String>,
+    #[arg(long)]
+    value_wei: Option<String>,
+    #[arg(long, default_value_t = 0)]
+    index: u32,
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::discover()?;
@@ -87,6 +121,8 @@ pub async fn run() -> Result<()> {
         Command::SignMessage(args) => cmd_sign_message(&paths, args),
         Command::SignTypedData(args) => cmd_sign_typed_data(&paths, args),
         Command::SendTransaction(args) => cmd_send_transaction(&paths, args).await,
+        Command::ReadContract(args) => cmd_read_contract(&paths, args).await,
+        Command::WriteContract(args) => cmd_write_contract(&paths, args).await,
         Command::Doctor => cmd_doctor(&paths),
         Command::Serve => cmd_serve(&paths).await,
     }
@@ -177,6 +213,53 @@ async fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Resul
     Ok(())
 }
 
+async fn cmd_read_contract(paths: &Paths, args: ReadContractArgs) -> Result<()> {
+    if !args.abi_stdin {
+        bail!("`ssaw read-contract` requires --abi-stdin");
+    }
+
+    let abi_json =
+        wallet::read_phrase_from_stdin().context("failed to read ABI JSON from stdin")?;
+    let selector = chain::ChainSelector::parse(&args.chain);
+    let output = wallet::read_contract(
+        paths,
+        &selector,
+        &args.address,
+        &abi_json,
+        &args.function,
+        &args.args,
+    )
+    .await?;
+    println!(
+        "{}",
+        serde_json::to_string(&output.outputs).context("failed to render contract output")?
+    );
+    Ok(())
+}
+
+async fn cmd_write_contract(paths: &Paths, args: WriteContractArgs) -> Result<()> {
+    if !args.abi_stdin {
+        bail!("`ssaw write-contract` requires --abi-stdin");
+    }
+
+    let abi_json =
+        wallet::read_phrase_from_stdin().context("failed to read ABI JSON from stdin")?;
+    let selector = chain::ChainSelector::parse(&args.chain);
+    let sent = wallet::write_contract(
+        paths,
+        &selector,
+        &args.address,
+        &abi_json,
+        &args.function,
+        &args.args,
+        args.value_wei.as_deref(),
+        args.index,
+    )
+    .await?;
+    println!("{}", sent.tx_hash);
+    Ok(())
+}
+
 fn cmd_doctor(paths: &Paths) -> Result<()> {
     let identity = paths.identity_file()?;
     println!("state_dir\t{}", paths.state_dir.display());
@@ -204,9 +287,5 @@ async fn cmd_serve(paths: &Paths) -> Result<()> {
 }
 
 fn exists_marker(path: &std::path::Path) -> &'static str {
-    if path.exists() {
-        "exists"
-    } else {
-        "missing"
-    }
+    if path.exists() { "exists" } else { "missing" }
 }
