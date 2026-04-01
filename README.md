@@ -1,69 +1,40 @@
 # SSAW
 
-SSAW is a local Ethereum wallet for agent workflows.
+Shark's Secure Agent Wallet.
 
-It keeps wallet seed material encrypted on disk, exposes a focused CLI, and can run as a stdio MCP server so agents can derive addresses, sign payloads, and submit transactions without handling raw private keys or mnemonics directly.
+SSAW is a local Ethereum wallet intended for agent use. It keeps wallet material encrypted on disk, exposes a small CLI, and can run a stdio MCP server for agent tooling.
 
-## Scope
+## Current Status
 
-SSAW is designed to keep wallet secrets out of:
-
-- chat transcripts
-- shell history
-- copied command lines
-- MCP tool responses
-
-This is not a hardened enclave or host-compromise defense. It is a pragmatic local wallet boundary for AI-assisted development.
-
-The design notes live in [SPEC.md](./SPEC.md). This README documents current behavior.
-
-## Current Capabilities
+Implemented today:
 
 - dedicated SSAW age identity at `~/.config/ssaw/identity.txt`
-- encrypted wallet seed per project
-- active project selection plus explicit `--project` overrides
-- address derivation by index or alias
-- project-local address aliases with labels
+- project-aware wallet storage
+- address derivation from a BIP-39 mnemonic
 - message signing
 - EIP-712 typed data signing
-- project-local named chain configuration
+- named chain configuration
 - native transaction sending
-- ABI-driven contract reads
-- ABI-driven contract writes
-- stdio MCP server with wallet and chain-management tools
-- cross-process locking for transaction submission
+- runtime ABI contract reads
+- runtime ABI contract writes
+- stdio MCP server with wallet tools
+- cross-process write locking for transaction submission
 
-## Project Model
+Planned but not implemented yet:
 
-Projects are the main separation boundary in SSAW.
+- hardened MCP/server mode
+- spending policy controls
+- Foundry integration
 
-Each project has its own:
+The authoritative design notes are in [SPEC.md](./SPEC.md), but this README reflects what the code can actually do right now.
 
-- encrypted seed
-- chain configuration
-- alias metadata
+The intended daily flow is:
 
-By default, CLI commands use the currently selected project. You can override that with `--project` when scripting or comparing projects side by side.
+- use `project ...` to create or switch the active project
+- run normal wallet commands against that active project
+- use `--project` only as an explicit override when scripting or comparing projects side by side
 
-Disk layout:
-
-```text
-~/.ssaw/
-  projects/
-    <project>/
-      seed.age
-      chains.toml
-      addresses.toml
-  current-project
-
-~/.config/ssaw/
-  config.toml
-  identity.txt
-```
-
-The `default` project uses `~/.ssaw/` directly for backward compatibility.
-
-## Development Environment
+## Setup
 
 Enter the dev shell:
 
@@ -71,21 +42,16 @@ Enter the dev shell:
 nix develop
 ```
 
-Inside the shell:
+Inside the dev shell, `ssaw` and `anvil` are available on `PATH`.
+The in-shell `ssaw` command is a thin wrapper around `cargo run`, so it tracks your local checkout without requiring a separate install step.
 
-- `cargo`, `rustc`, `rustfmt`, and `clippy` are available
-- `anvil` is available for local chain testing
-- `ssaw` is a thin wrapper around `cargo run --`
-
-Run the packaged application directly:
+You can also run the packaged app directly:
 
 ```sh
 nix run
 ```
 
-## Quick Start
-
-Initialize a new wallet in the current project:
+Initialize a new wallet:
 
 ```sh
 cargo run -- init
@@ -97,19 +63,21 @@ Import an existing mnemonic from stdin:
 printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- import
 ```
 
-Inspect resolved paths and file presence:
+Check local state paths:
 
 ```sh
 cargo run -- doctor
 ```
 
-Show the first derived address:
+## Projects
 
-```sh
-cargo run -- address
-```
+SSAW now supports project selection.
 
-## Working With Projects
+Current layout:
+
+- the legacy root wallet is the `default` project
+- named projects live under `~/.ssaw/projects/<name>/`
+- the selected project is stored in `~/.ssaw/current-project`
 
 Create and switch to a project:
 
@@ -117,73 +85,79 @@ Create and switch to a project:
 cargo run -- project init dex
 ```
 
-Import directly into a named project:
+That creates the project, initializes its wallet, and selects it.
+
+Import directly into a project:
 
 ```sh
-printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- project import dex
+printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- project import imported
 ```
 
-Switch projects:
+Switch between projects:
 
 ```sh
 cargo run -- project use default
 cargo run -- project use dex
 ```
 
-List projects and show the active one:
+List projects:
 
 ```sh
 cargo run -- project list
+```
+
+Show the current project:
+
+```sh
 cargo run -- project current
 ```
 
-Override the selected project for a single command:
+You can also override the selected project per command, but that is meant more for scripts and one-off targeting than normal interactive use:
 
 ```sh
 cargo run -- --project dex address
+cargo run -- --project dex serve
 ```
 
-## Address Aliases
+## Aliases
 
-Aliases are project-local names for derivation indices.
+Aliases are project-local names for derived address indices.
 
-Create an alias:
+Set an alias:
 
 ```sh
 cargo run -- alias set deployer --index 0 --label deployer --label admin
 ```
 
-Inspect aliases:
+List aliases:
 
 ```sh
 cargo run -- alias list
+```
+
+Show one alias:
+
+```sh
 cargo run -- alias show deployer
 ```
 
-Use an alias anywhere an address index is accepted:
+Use an alias anywhere an address index matters:
 
 ```sh
 cargo run -- address --alias deployer
 cargo run -- sign-message "hello" --alias deployer
 ```
 
-## Chain Configuration
+`list_addresses` and `get_address` responses also include alias metadata when available.
 
-Chains are stored per project. Transaction and contract commands require the target chain to be configured in that project first.
+## Wallet Commands
 
-Add a chain:
-
-```sh
-printf '%s' 'http://127.0.0.1:8545' | cargo run -- add-chain local 31337 --rpc-url-stdin
-```
-
-List configured chains:
+Derive addresses:
 
 ```sh
-cargo run -- list-chains
+cargo run -- address
+cargo run -- address --index 1
 ```
-
-## Signing
 
 Sign a plain message:
 
@@ -197,6 +171,20 @@ Sign EIP-712 typed data from stdin:
 printf '%s' '{"types":{"EIP712Domain":[{"name":"name","type":"string"}],"Mail":[{"name":"contents","type":"string"}]},"primaryType":"Mail","domain":{"name":"SSAW"},"message":{"contents":"hello"}}' | cargo run -- sign-typed-data
 ```
 
+## Chain Configuration
+
+Add a chain:
+
+```sh
+printf '%s' 'http://127.0.0.1:8545' | cargo run -- add-chain local 31337 --rpc-url-stdin
+```
+
+List configured chains:
+
+```sh
+cargo run -- list-chains
+```
+
 ## Sending Transactions
 
 Send native ETH:
@@ -208,7 +196,7 @@ cargo run -- send-transaction \
   --value-wei 1
 ```
 
-Wait for a receipt:
+Wait for a receipt instead of returning only the transaction hash:
 
 ```sh
 cargo run -- send-transaction \
@@ -219,15 +207,17 @@ cargo run -- send-transaction \
   --timeout-secs 60
 ```
 
-Notes:
+Note:
 
-- a newly initialized wallet is not funded automatically
-- on Anvil, fund the derived address first or import a funded mnemonic
-- chain configuration is project-local
+- a freshly initialized wallet will not be funded on Anvil by default
+- fund the derived address first, or import a funded mnemonic
+- transactions use the currently selected project unless `--project` is passed
 
 ## Contract Calls
 
-Read a contract function using ABI JSON from stdin:
+SSAW accepts contract ABI JSON on stdin and repeated `--arg` values as Solidity literals.
+
+Read a contract function:
 
 ```sh
 cat abi.json | cargo run -- read-contract \
@@ -250,7 +240,7 @@ cat abi.json | cargo run -- write-contract \
   --arg 1
 ```
 
-Wait for a write receipt:
+Wait for a contract write receipt:
 
 ```sh
 cat abi.json | cargo run -- write-contract \
@@ -270,20 +260,45 @@ Attach native value to a payable call:
 cat abi.json | cargo run -- write-contract \
   --chain local \
   --address 0xYourContract \
-  --function mint \
+  --function deposit \
   --abi-stdin \
-  --value-wei 10000000000000000
+  --value-wei 1000000000000000
 ```
+
+Current behavior:
+
+- function resolution is by name, using the first ABI match
+- outputs are printed as JSON values
+- integers are rendered as decimal strings
+- byte values are rendered as `0x` hex strings
+- `send-transaction` and `write-contract` return only `tx_hash` by default
+- with `--wait`, they return JSON including confirmation state and receipt summary
+- write operations take an exclusive wallet lock, so concurrent processes serialize sends instead of racing
 
 ## MCP Server
 
-Start the stdio MCP server:
+Run the server:
 
 ```sh
 cargo run -- serve
 ```
 
-The server speaks JSON-RPC 2.0 over stdio and supports the MCP handshake:
+`ssaw serve` now speaks MCP over stdio using JSON-RPC 2.0 messages, one JSON message per line.
+
+Within one `ssaw serve` process, requests are handled sequentially. Across multiple CLI/server processes sharing the same wallet, write operations are serialized by a project-local wallet lock file:
+
+- `default`: `~/.ssaw/wallet.lock`
+- named project: `~/.ssaw/projects/<name>/wallet.lock`
+
+If you want a separate stdio wallet for a separate workstream, start `serve` with a different project:
+
+```sh
+cargo run -- --project dex serve
+```
+
+Tool arguments may include `"project": "<name>"` to target a project explicitly without starting a separate process for each one.
+
+Current MCP methods:
 
 - `initialize`
 - `notifications/initialized`
@@ -291,36 +306,80 @@ The server speaks JSON-RPC 2.0 over stdio and supports the MCP handshake:
 - `tools/list`
 - `tools/call`
 
-Current tool surface:
+Current wallet tools:
 
 - `get_address`
 - `list_addresses`
-- `list_chains`
-- `add_chain`
-- `doctor`
 - `sign_message`
 - `sign_typed_data`
 - `send_transaction`
 - `read_contract`
 - `write_contract`
 
-Operational notes:
+Address-targeting methods also accept `alias` in place of `index` for project-local alias lookup.
 
-- most tools accept an optional `project` override
-- chain configuration is project-local, including MCP calls
-- `send_transaction`, `read_contract`, and `write_contract` require prior chain configuration
-- `doctor` is intended for agent debugging and returns resolved paths, file presence, aliases, and configured chains
+Minimal handshake example:
+
+```sh
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  | cargo run -- serve
+```
+
+Call `get_address` through MCP:
+
+```sh
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_address","arguments":{"project":"dex","alias":"deployer"}}}' \
+  | cargo run -- serve
+```
+
+Call `send_transaction` through MCP:
+
+```sh
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_transaction","arguments":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","index":0}}}' \
+  | cargo run -- serve
+```
+
+Call `read_contract` through MCP:
+
+```sh
+printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_contract","arguments":{"chain":"local","address":"0xYourContract","function":"balanceOf","abi":[{"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"owner","type":"address"}],"outputs":[{"name":"","type":"uint256"}]}],"args":["0x000000000000000000000000000000000000dead"]}}}' \
+  | cargo run -- serve
+```
 
 ## Testing
 
-Run the full test suite inside the dev shell:
+Run the test suite:
 
 ```sh
-cargo test
+nix develop --no-update-lock-file -c cargo test
 ```
 
-The integration tests cover:
+The test suite now includes:
 
-- CLI project and alias flows
-- MCP tool discovery and responses
-- local-chain transaction and contract flows against Anvil
+- CLI/project/alias integration coverage in `tests/cli_flow.rs`
+- Anvil-backed transaction and contract flow coverage in `tests/anvil_flow.rs`
+
+For isolated local testing, use a temporary home directory:
+
+```sh
+export HOME=/tmp/ssaw-test
+rm -rf "$HOME"
+mkdir -p "$HOME"
+nix develop
+```
+
+## Documentation Rule
+
+When code changes add, remove, or materially change SSAW behavior, update this README in the same pass so the documented CLI and server surface stays accurate.
