@@ -81,6 +81,19 @@ struct ListAddressesParams {
     count: Option<u32>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(default)]
+struct ProjectParams {
+    project: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AddChainParams {
+    name: String,
+    chain_id: u64,
+    rpc_url: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct SignMessageParams {
     message: String,
@@ -408,6 +421,9 @@ fn tool_exists(name: &str) -> bool {
         name,
         "get_address"
             | "list_addresses"
+            | "list_chains"
+            | "add_chain"
+            | "doctor"
             | "sign_message"
             | "sign_typed_data"
             | "send_transaction"
@@ -436,6 +452,43 @@ fn tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "list_chains",
+            "description": "List configured chains for the selected project. Chain configuration is project-local.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Optional project override." }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "add_chain",
+            "description": "Add or update a project-local chain configuration so transaction and contract tools can use it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Optional project override." },
+                    "name": { "type": "string", "description": "Chain alias within the selected project." },
+                    "chain_id": { "type": "integer", "minimum": 0, "description": "Numeric chain id." },
+                    "rpc_url": { "type": "string", "description": "RPC endpoint URL to store for this chain." }
+                },
+                "required": ["name", "chain_id", "rpc_url"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "doctor",
+            "description": "Return the resolved project context, wallet file presence, aliases, and configured chains for debugging agent workflows.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "project": { "type": "string", "description": "Optional project override." }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "sign_message",
             "description": "Sign an arbitrary UTF-8 message with a project wallet address.",
             "inputSchema": sign_schema(json!({
@@ -454,7 +507,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "send_transaction",
-            "description": "Send a native ETH transaction or raw calldata transaction on a configured chain.",
+            "description": "Send a native ETH transaction or raw calldata transaction on a configured chain. Use `list_chains` or `add_chain` first if the target project has not registered that chain yet.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -474,7 +527,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "read_contract",
-            "description": "Run an eth_call against a contract and decode outputs using a provided ABI.",
+            "description": "Run an eth_call against a contract and decode outputs using a provided ABI. The selected chain must already be configured for the target project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -495,7 +548,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "write_contract",
-            "description": "Sign and submit a contract write transaction using a provided ABI.",
+            "description": "Sign and submit a contract write transaction using a provided ABI. The selected chain must already be configured for the target project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -578,7 +631,7 @@ fn chain_schema() -> Value {
 async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> Result<Value> {
     let paths = request_paths(paths, params)?;
 
-    match method {
+    let result = match method {
         "get_address" => parse_params::<AddressParams>(params).and_then(|params| {
             let target =
                 wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
@@ -590,6 +643,34 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
         "list_addresses" => parse_params::<ListAddressesParams>(params)
             .and_then(|params| wallet::list_addresses(&paths, params.count))
             .map(|addresses| json!({ "addresses": addresses })),
+        "list_chains" => parse_params::<ProjectParams>(params)
+            .and_then(|_| crate::chain::load(&paths))
+            .map(|config| {
+                let chains: Vec<Value> = config
+                    .chains
+                    .into_iter()
+                    .map(|(name, entry)| {
+                        json!({
+                            "name": name,
+                            "chain_id": entry.chain_id,
+                            "rpc_url": entry.rpc_url
+                        })
+                    })
+                    .collect();
+                json!({ "chains": chains })
+            }),
+        "add_chain" => parse_params::<AddChainParams>(params).and_then(|params| {
+            crate::chain::add_chain(&paths, &params.name, params.chain_id, params.rpc_url)?;
+            crate::chain::resolve(&paths, &crate::chain::ChainSelector::Name(params.name.clone()))
+                .map(|entry| {
+                    json!({
+                        "name": params.name,
+                        "chain_id": entry.chain_id,
+                        "rpc_url": entry.rpc_url
+                    })
+                })
+        }),
+        "doctor" => parse_params::<ProjectParams>(params).and_then(|_| doctor(&paths)),
         "sign_message" => parse_params::<SignMessageParams>(params).and_then(|params| {
             let target =
                 wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
@@ -661,7 +742,9 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
             .map(|sent| serde_json::to_value(&sent).expect("sent tx serializes"))
         }
         _ => bail!("unknown method `{method}`"),
-    }
+    }?;
+
+    Ok(with_project_context(&paths, result))
 }
 
 fn write_json_line(output: &mut impl Write, value: &Value) -> Result<()> {
@@ -698,6 +781,54 @@ fn request_paths(base_paths: &Paths, params: &Value) -> Result<Paths> {
         Some(_) => bail!("project must be a string"),
         None => Ok(base_paths.clone()),
     }
+}
+
+fn with_project_context(paths: &Paths, value: Value) -> Value {
+    match value {
+        Value::Object(mut object) => {
+            object.insert(
+                "project".to_owned(),
+                Value::String(paths.project_name.clone()),
+            );
+            Value::Object(object)
+        }
+        other => json!({
+            "project": paths.project_name,
+            "result": other
+        }),
+    }
+}
+
+fn doctor(paths: &Paths) -> Result<Value> {
+    let identity_path = paths.identity_file()?;
+    let aliases = crate::alias::list_aliases(paths)?;
+    let chain_config = crate::chain::load(paths)?;
+    let chains: Vec<Value> = chain_config
+        .chains
+        .into_iter()
+        .map(|(name, entry)| {
+            json!({
+                "name": name,
+                "chain_id": entry.chain_id,
+                "rpc_url": entry.rpc_url
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "state_dir": paths.state_dir.display().to_string(),
+        "project_dir": paths.project_dir.display().to_string(),
+        "current_project_file": paths.current_project_file.display().to_string(),
+        "config_dir": paths.config_dir.display().to_string(),
+        "identity_file": identity_path.display().to_string(),
+        "seed_file": paths.seed_file.display().to_string(),
+        "chains_file": paths.chains_file.display().to_string(),
+        "addresses_file": paths.addresses_file.display().to_string(),
+        "seed_exists": paths.seed_file.exists(),
+        "identity_exists": identity_path.exists(),
+        "aliases": aliases,
+        "chains": chains
+    }))
 }
 
 #[cfg(test)]

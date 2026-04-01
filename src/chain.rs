@@ -55,19 +55,20 @@ pub fn add_chain(paths: &Paths, name: &str, chain_id: u64, rpc_url: String) -> R
 
 pub fn resolve(paths: &Paths, selector: &ChainSelector) -> Result<ChainEntry> {
     let config = load(paths)?;
+    let available = configured_chain_names(&config);
 
     match selector {
         ChainSelector::Name(name) => config
             .chains
             .get(name)
             .cloned()
-            .with_context(|| format!("unknown chain `{name}`")),
+            .with_context(|| unknown_chain_name_error(paths, name, &available)),
         ChainSelector::ChainId(chain_id) => config
             .chains
             .values()
             .find(|entry| entry.chain_id == *chain_id)
             .cloned()
-            .with_context(|| format!("unknown chain id `{chain_id}`")),
+            .with_context(|| unknown_chain_id_error(paths, *chain_id, &available)),
     }
 }
 
@@ -80,9 +81,50 @@ impl ChainSelector {
     }
 }
 
+fn configured_chain_names(config: &ChainConfig) -> Vec<String> {
+    config.chains.keys().cloned().collect()
+}
+
+fn unknown_chain_name_error(paths: &Paths, name: &str, available: &[String]) -> String {
+    let mut message = format!(
+        "unknown chain `{name}` in project `{}`; configured chains: [{}]",
+        paths.project_name,
+        available.join(", ")
+    );
+
+    if is_local_chain_name(name) {
+        message.push_str(
+            ". hint: local chain config is project-local; use `list_chains`, `add_chain`, or `ssaw add-chain` to register your local RPC URL",
+        );
+    }
+
+    message
+}
+
+fn unknown_chain_id_error(paths: &Paths, chain_id: u64, available: &[String]) -> String {
+    let mut message = format!(
+        "unknown chain id `{chain_id}` in project `{}`; configured chains: [{}]",
+        paths.project_name,
+        available.join(", ")
+    );
+
+    if chain_id == 31337 {
+        message.push_str(
+            ". hint: local chain config is project-local; use `list_chains`, `add_chain`, or `ssaw add-chain` to register your local RPC URL",
+        );
+    }
+
+    message
+}
+
+fn is_local_chain_name(name: &str) -> bool {
+    matches!(name, "local" | "localhost" | "anvil")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Paths;
 
     #[test]
     fn serializes_chain_config() {
@@ -107,5 +149,15 @@ mod tests {
             ChainSelector::Name("base-sepolia".to_owned())
         );
         assert_eq!(ChainSelector::parse("84532"), ChainSelector::ChainId(84532));
+    }
+
+    #[test]
+    fn includes_project_context_in_unknown_local_chain_error() {
+        let paths = Paths::discover_with_project(Some("dex")).expect("paths");
+        let error = resolve(&paths, &ChainSelector::Name("local".to_owned())).expect_err("error");
+        let message = error.to_string();
+        assert!(message.contains("unknown chain `local` in project `dex`"));
+        assert!(message.contains("configured chains: []"));
+        assert!(message.contains("project-local"));
     }
 }
