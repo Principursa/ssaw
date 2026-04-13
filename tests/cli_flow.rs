@@ -1037,3 +1037,122 @@ fn serve_both_index_and_alias_returns_error() {
         .expect("error");
     assert!(error.contains("either index or alias"));
 }
+
+#[test]
+fn forge_cli_passes_through_forge_output() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let forge = ssaw_cmd(home.path())
+        .args(["forge", "--", "--version"])
+        .output()
+        .expect("forge --version");
+    assert!(
+        forge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forge.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&forge.stdout);
+    assert!(stdout.contains("forge"));
+}
+
+#[test]
+fn forge_cli_requires_forge_args() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(init.status.success());
+
+    let forge = ssaw_cmd(home.path())
+        .args(["forge"])
+        .output()
+        .expect("forge no args");
+    assert!(!forge.status.success());
+    let stderr = String::from_utf8_lossy(&forge.stderr);
+    assert!(stderr.contains("no forge arguments provided"));
+}
+
+#[test]
+fn serve_forge_tool_runs_forge_version() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"forge","arguments":{"args":["--version"]}}}"#,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 2);
+    let structured = &responses[1]["result"]["structuredContent"];
+    assert_eq!(structured["project"], "dex");
+    assert_eq!(structured["exit_code"], serde_json::json!(0));
+    assert!(
+        structured["stdout"]
+            .as_str()
+            .expect("stdout")
+            .contains("forge")
+    );
+}
+
+#[test]
+fn serve_tools_list_includes_forge() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(init.status.success());
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+        ],
+    );
+    assert!(output.status.success());
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert!(
+        responses[1]["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .any(|tool| tool["name"] == "forge")
+    );
+}
