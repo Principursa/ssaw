@@ -121,6 +121,12 @@ struct SeedPayload {
     passphrase: Option<String>,
 }
 
+#[derive(Debug)]
+struct LoadedSeedPayload {
+    mnemonic: Zeroizing<String>,
+    passphrase: Option<Zeroizing<String>>,
+}
+
 pub fn init(paths: &Paths) -> Result<(String, WalletSummary)> {
     if paths.seed_file.exists() {
         bail!(
@@ -372,12 +378,12 @@ pub fn read_secret_line(prompt: &str) -> Result<String> {
 fn signer_for_index(paths: &Paths, index: u32) -> Result<PrivateKeySigner> {
     let payload = load_payload(paths)?;
     let mut builder = MnemonicBuilder::<English>::default()
-        .phrase(payload.mnemonic)
+        .phrase(payload.mnemonic.as_str())
         .index(index)
         .context("failed to apply mnemonic index")?;
 
-    if let Some(passphrase) = payload.passphrase {
-        builder = builder.password(passphrase);
+    if let Some(passphrase) = payload.passphrase.as_ref() {
+        builder = builder.password(passphrase.as_str());
     }
 
     builder
@@ -399,7 +405,8 @@ fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> 
         mnemonic: phrase,
         passphrase,
     };
-    let body = toml::to_string(&payload).context("failed to serialize seed payload")?;
+    let body =
+        Zeroizing::new(toml::to_string(&payload).context("failed to serialize seed payload")?);
     let recipient = identity.to_public();
     let encryptor = age::Encryptor::with_recipients(iter::once(&recipient as &dyn age::Recipient))
         .context("failed to initialize age encryptor")?;
@@ -418,7 +425,7 @@ fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> 
     write_file(&paths.seed_file, encrypted)
 }
 
-fn load_payload(paths: &Paths) -> Result<SeedPayload> {
+fn load_payload(paths: &Paths) -> Result<LoadedSeedPayload> {
     if !paths.seed_file.exists() {
         bail!(
             "project `{}` has no wallet seed yet; run `ssaw --project {} init` or `ssaw --project {} import`",
@@ -437,14 +444,14 @@ fn load_payload(paths: &Paths) -> Result<SeedPayload> {
     let mut reader = decryptor
         .decrypt(iter::once(&identity as &dyn age::Identity))
         .context("failed to decrypt seed file with local identity")?;
-    let mut decrypted = String::new();
+    let mut decrypted = Zeroizing::new(String::new());
     reader
         .read_to_string(&mut decrypted)
         .context("failed to decode decrypted seed payload")?;
 
     let payload: SeedPayload =
-        toml::from_str(&decrypted).context("failed to parse decrypted seed payload")?;
-    Ok(payload)
+        toml::from_str(decrypted.as_str()).context("failed to parse decrypted seed payload")?;
+    Ok(LoadedSeedPayload::from(payload))
 }
 
 fn load_identity(path: &Path) -> Result<age::x25519::Identity> {
@@ -461,6 +468,15 @@ fn normalize_phrase(phrase: &str) -> Result<String> {
     let mnemonic = Mnemonic::parse_in_normalized(Language::English, phrase.trim())
         .context("mnemonic is not valid BIP-39 English")?;
     Ok(mnemonic.to_string())
+}
+
+impl From<SeedPayload> for LoadedSeedPayload {
+    fn from(payload: SeedPayload) -> Self {
+        Self {
+            mnemonic: Zeroizing::new(payload.mnemonic),
+            passphrase: payload.passphrase.map(Zeroizing::new),
+        }
+    }
 }
 
 fn parse_address(value: &str) -> Result<Address> {
