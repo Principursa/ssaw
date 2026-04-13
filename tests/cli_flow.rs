@@ -3,10 +3,22 @@ use std::process::Command;
 use serde_json::Value;
 use tempfile::TempDir;
 
+const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
+const TEST_TYPED_DATA: &str = r#"{"types":{"EIP712Domain":[{"name":"name","type":"string"}],"Mail":[{"name":"contents","type":"string"}]},"primaryType":"Mail","domain":{"name":"SSAW"},"message":{"contents":"hello"}}"#;
+
 fn ssaw_cmd(home: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ssaw"));
     cmd.env("HOME", home);
     cmd
+}
+
+fn feed_stdin_and_wait(mut child: std::process::Child, input: &str) -> std::process::Output {
+    use std::io::Write;
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    stdin.write_all(input.as_bytes()).expect("write stdin");
+    drop(stdin);
+    child.wait_with_output().expect("wait output")
 }
 
 fn run_server_requests(home: &std::path::Path, requests: &[&str]) -> std::process::Output {
@@ -217,6 +229,55 @@ fn serve_supports_mcp_tools_and_alias_metadata() {
             .expect("address")
             .starts_with("0x")
     );
+}
+
+#[test]
+fn cli_signing_commands_return_hex_signatures() {
+    let home = TempDir::new().expect("temp home");
+
+    let import = ssaw_cmd(home.path())
+        .args(["project", "import", "dex"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn import");
+    let import = feed_stdin_and_wait(import, TEST_MNEMONIC);
+    assert!(
+        import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let sign_message = ssaw_cmd(home.path())
+        .args(["sign-message", "hello"])
+        .output()
+        .expect("sign message");
+    assert!(
+        sign_message.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sign_message.stderr)
+    );
+    let message_signature = String::from_utf8_lossy(&sign_message.stdout);
+    assert!(message_signature.trim().starts_with("0x"));
+    assert_eq!(message_signature.trim().len(), 132);
+
+    let sign_typed_data = ssaw_cmd(home.path())
+        .args(["sign-typed-data"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn sign typed data");
+    let sign_typed_data = feed_stdin_and_wait(sign_typed_data, TEST_TYPED_DATA);
+    assert!(
+        sign_typed_data.status.success(),
+        "{}",
+        String::from_utf8_lossy(&sign_typed_data.stderr)
+    );
+    let typed_signature = String::from_utf8_lossy(&sign_typed_data.stdout);
+    assert!(typed_signature.trim().starts_with("0x"));
+    assert_eq!(typed_signature.trim().len(), 132);
 }
 
 #[test]

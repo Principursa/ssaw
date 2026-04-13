@@ -136,7 +136,7 @@ async fn send_and_contract_wait_flow() {
             "--address",
             &format!("{:#x}", contract),
             "--function",
-            "counter",
+            "counter()",
             "--abi-stdin",
         ])
         .stdin(Stdio::piped())
@@ -155,7 +155,7 @@ async fn send_and_contract_wait_flow() {
             "--address",
             &format!("{:#x}", contract),
             "--function",
-            "increment",
+            "increment()",
             "--abi-stdin",
             "--wait",
             "--timeout-secs",
@@ -182,7 +182,7 @@ async fn send_and_contract_wait_flow() {
             "--address",
             &format!("{:#x}", contract),
             "--function",
-            "counter",
+            "counter()",
             "--abi-stdin",
         ])
         .stdin(Stdio::piped())

@@ -531,7 +531,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "chain": chain_schema(),
                     "address": { "type": "string", "description": "Contract address." },
-                    "function": { "type": "string", "description": "Function name to call." },
+                    "function": { "type": "string", "description": "Function name or full signature to call, e.g. balanceOf or transfer(address,uint256)." },
                     "abi": { "type": "array", "description": "Contract ABI entries." },
                     "args": {
                         "type": "array",
@@ -551,7 +551,7 @@ fn tool_definitions() -> Vec<Value> {
                 "properties": {
                     "chain": chain_schema(),
                     "address": { "type": "string", "description": "Contract address." },
-                    "function": { "type": "string", "description": "Function name to call." },
+                    "function": { "type": "string", "description": "Function name or full signature to call, e.g. balanceOf or transfer(address,uint256)." },
                     "abi": { "type": "array", "description": "Contract ABI entries." },
                     "args": {
                         "type": "array",

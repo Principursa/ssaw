@@ -339,7 +339,7 @@ Notes:
 
 SSAW reads ABI JSON from stdin and accepts repeated `--arg` values as Solidity-like string literals.
 
-Read a contract function:
+Read a contract function by name or signature:
 
 ```sh
 cat abi.json | cargo run -- read-contract \
@@ -350,13 +350,13 @@ cat abi.json | cargo run -- read-contract \
   --arg 0x000000000000000000000000000000000000dead
 ```
 
-Write to a contract:
+Write to a contract by name or signature:
 
 ```sh
 cat abi.json | cargo run -- write-contract \
   --chain local \
   --address 0xYourContract \
-  --function transfer \
+  --function transfer(address,uint256) \
   --abi-stdin \
   --arg 0x000000000000000000000000000000000000dead \
   --arg 1
@@ -368,7 +368,7 @@ Wait for a contract write receipt:
 cat abi.json | cargo run -- write-contract \
   --chain local \
   --address 0xYourContract \
-  --function transfer \
+  --function transfer(address,uint256) \
   --abi-stdin \
   --arg 0x000000000000000000000000000000000000dead \
   --arg 1 \
@@ -382,14 +382,15 @@ Attach native value to a payable call:
 cat abi.json | cargo run -- write-contract \
   --chain local \
   --address 0xYourContract \
-  --function deposit \
+  --function deposit() \
   --abi-stdin \
   --value-wei 1000000000000000
 ```
 
 Current behavior:
 
-- function resolution is by name and uses the first ABI match
+- unique function names may be addressed by bare name
+- overloaded functions must use a full signature such as `transfer(address,uint256)`
 - outputs are printed as JSON values
 - integers are rendered as decimal strings
 - byte values are rendered as `0x` hex strings

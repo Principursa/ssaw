@@ -159,7 +159,7 @@ struct ReadContractArgs {
     chain: String,
     #[arg(long)]
     address: String,
-    #[arg(long)]
+    #[arg(long, help = "Function name or full signature, e.g. balanceOf or transfer(address,uint256)")]
     function: String,
     #[arg(long, default_value_t = false)]
     abi_stdin: bool,
@@ -173,7 +173,7 @@ struct WriteContractArgs {
     chain: String,
     #[arg(long)]
     address: String,
-    #[arg(long)]
+    #[arg(long, help = "Function name or full signature, e.g. balanceOf or transfer(address,uint256)")]
     function: String,
     #[arg(long, default_value_t = false)]
     abi_stdin: bool,
