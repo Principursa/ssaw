@@ -351,3 +351,102 @@ fn serve_unknown_chain_error_includes_project_context_and_hint() {
     assert!(error.contains("configured chains: []"));
     assert!(error.contains("project-local"));
 }
+
+#[test]
+fn cli_invalid_rpc_url_error_does_not_echo_configured_url() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let add_chain = ssaw_cmd(home.path())
+        .args(["add-chain", "local", "31337", "--rpc-url-stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map(|mut child| {
+            use std::io::Write;
+
+            let mut stdin = child.stdin.take().expect("stdin");
+            stdin
+                .write_all(b"not-a-url?api_key=super-secret")
+                .expect("write rpc url");
+            drop(stdin);
+            child.wait_with_output().expect("wait output")
+        })
+        .expect("spawn add-chain");
+    assert!(
+        add_chain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_chain.stderr)
+    );
+
+    let send = ssaw_cmd(home.path())
+        .args([
+            "send-transaction",
+            "--chain",
+            "local",
+            "--to",
+            "0x000000000000000000000000000000000000dead",
+            "--value-wei",
+            "1",
+        ])
+        .output()
+        .expect("send transaction");
+    assert!(
+        !send.status.success(),
+        "send transaction unexpectedly succeeded"
+    );
+
+    let stderr = String::from_utf8_lossy(&send.stderr);
+    assert!(stderr.contains("invalid rpc url in configured chain"));
+    assert!(!stderr.contains("not-a-url?api_key=super-secret"));
+}
+
+#[test]
+fn mcp_invalid_rpc_url_error_does_not_echo_configured_url() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add_chain","arguments":{"project":"dex","name":"local","chain_id":31337,"rpc_url":"not-a-url?api_key=super-secret"}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_transaction","arguments":{"project":"dex","chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1"}}}"#,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 3);
+
+    let error = responses[2]["result"]["structuredContent"]["error"]
+        .as_str()
+        .expect("error");
+    assert!(error.contains("invalid rpc url in configured chain"));
+    assert!(!error.contains("not-a-url?api_key=super-secret"));
+}

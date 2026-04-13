@@ -249,13 +249,17 @@ fn cmd_project_import(paths: &Paths, args: ProjectImportArgs) -> Result<()> {
     let project_paths = Paths::discover_with_project(Some(&args.name))?;
     project_paths.ensure_parent_dirs()?;
     paths.write_current_project(&args.name)?;
-    let phrase = wallet::read_phrase_from_stdin()?;
+    let phrase = wallet::read_secret_from_stdin()?;
     let passphrase = if args.passphrase_stdin {
         Some(wallet::read_secret_line("BIP-39 passphrase: ")?)
     } else {
         None
     };
-    let summary = wallet::import(&project_paths, phrase, passphrase)?;
+    let summary = wallet::import(
+        &project_paths,
+        phrase.as_str(),
+        passphrase.as_ref().map(|value| value.as_str()),
+    )?;
     println!("Project: {}", project_paths.project_name);
     println!("Address[0]: {}", summary.address);
     println!("Selected project `{}`", project_paths.project_name);
@@ -342,13 +346,17 @@ fn cmd_init(paths: &Paths) -> Result<()> {
 }
 
 fn cmd_import(paths: &Paths, args: ImportArgs) -> Result<()> {
-    let phrase = wallet::read_phrase_from_stdin()?;
+    let phrase = wallet::read_secret_from_stdin()?;
     let passphrase = if args.passphrase_stdin {
         Some(wallet::read_secret_line("BIP-39 passphrase: ")?)
     } else {
         None
     };
-    let summary = wallet::import(paths, phrase, passphrase)?;
+    let summary = wallet::import(
+        paths,
+        phrase.as_str(),
+        passphrase.as_ref().map(|value| value.as_str()),
+    )?;
     println!("Project: {}", paths.project_name);
     println!("Address[0]: {}", summary.address);
     Ok(())

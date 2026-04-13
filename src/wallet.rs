@@ -138,15 +138,15 @@ pub fn init(paths: &Paths) -> Result<(String, WalletSummary)> {
     let mnemonic =
         Mnemonic::generate_in(Language::English, 24).context("failed to generate mnemonic")?;
     let phrase = mnemonic.to_string();
-    persist_phrase(paths, phrase.clone(), None)?;
+    persist_phrase(paths, phrase.as_str(), None)?;
     let address = derive_address(paths, 0)?;
 
     Ok((phrase, WalletSummary { address }))
 }
 
-pub fn import(paths: &Paths, phrase: String, passphrase: Option<String>) -> Result<WalletSummary> {
+pub fn import(paths: &Paths, phrase: &str, passphrase: Option<&str>) -> Result<WalletSummary> {
     let normalized = normalize_phrase(&phrase)?;
-    persist_phrase(paths, normalized, passphrase)?;
+    persist_phrase(paths, normalized.as_str(), passphrase)?;
     let address = derive_address(paths, 0)?;
     Ok(WalletSummary { address })
 }
@@ -246,7 +246,7 @@ pub async fn send_transaction(
     let rpc_url = chain
         .rpc_url
         .parse()
-        .with_context(|| format!("invalid rpc url `{}`", chain.rpc_url))?;
+        .context("invalid rpc url in configured chain")?;
     let provider = ProviderBuilder::new().wallet(signer).connect_http(rpc_url);
 
     let mut tx = TransactionRequest::default()
@@ -278,7 +278,7 @@ pub async fn read_contract(
     let rpc_url = chain
         .rpc_url
         .parse()
-        .with_context(|| format!("invalid rpc url `{}`", chain.rpc_url))?;
+        .context("invalid rpc url in configured chain")?;
     let provider = ProviderBuilder::new().connect_http(rpc_url);
     let interface = parse_interface(abi_json)?;
     let contract =
@@ -313,7 +313,7 @@ pub async fn write_contract(
     let rpc_url = chain
         .rpc_url
         .parse()
-        .with_context(|| format!("invalid rpc url `{}`", chain.rpc_url))?;
+        .context("invalid rpc url in configured chain")?;
     let provider = ProviderBuilder::new().wallet(signer).connect_http(rpc_url);
     let interface = parse_interface(abi_json)?;
     let contract =
@@ -355,16 +355,29 @@ pub fn read_phrase_from_stdin() -> Result<String> {
     let mut buffer = String::new();
     std::io::stdin()
         .read_to_string(&mut buffer)
-        .context("failed to read mnemonic from stdin")?;
+        .context("failed to read stdin input")?;
 
     if buffer.trim().is_empty() {
-        bail!("mnemonic input was empty");
+        bail!("stdin input was empty");
     }
 
     Ok(buffer)
 }
 
-pub fn read_secret_line(prompt: &str) -> Result<String> {
+pub fn read_secret_from_stdin() -> Result<Zeroizing<String>> {
+    let mut buffer = Zeroizing::new(String::new());
+    std::io::stdin()
+        .read_to_string(&mut buffer)
+        .context("failed to read secret input from stdin")?;
+
+    if buffer.trim().is_empty() {
+        bail!("secret input was empty");
+    }
+
+    Ok(buffer)
+}
+
+pub fn read_secret_line(prompt: &str) -> Result<Zeroizing<String>> {
     let mut stdout = std::io::stdout();
     stdout
         .write_all(prompt.as_bytes())
@@ -372,7 +385,7 @@ pub fn read_secret_line(prompt: &str) -> Result<String> {
     stdout.flush().context("failed to flush prompt")?;
 
     let value = rpassword::read_password().context("failed to read secret input")?;
-    Ok(value)
+    Ok(Zeroizing::new(value))
 }
 
 fn signer_for_index(paths: &Paths, index: u32) -> Result<PrivateKeySigner> {
@@ -391,7 +404,7 @@ fn signer_for_index(paths: &Paths, index: u32) -> Result<PrivateKeySigner> {
         .context("failed to derive signer from mnemonic")
 }
 
-fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> Result<()> {
+fn persist_phrase(paths: &Paths, phrase: &str, passphrase: Option<&str>) -> Result<()> {
     paths.ensure_parent_dirs()?;
     let identity_path = paths.identity_file()?;
     let identity = if identity_path.exists() {
@@ -402,8 +415,8 @@ fn persist_phrase(paths: &Paths, phrase: String, passphrase: Option<String>) -> 
     };
 
     let payload = SeedPayload {
-        mnemonic: phrase,
-        passphrase,
+        mnemonic: phrase.to_owned(),
+        passphrase: passphrase.map(str::to_owned),
     };
     let body =
         Zeroizing::new(toml::to_string(&payload).context("failed to serialize seed payload")?);
