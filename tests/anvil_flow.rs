@@ -243,7 +243,7 @@ async fn server_transaction_tools_include_signer_alias_metadata() {
     let output = run_server_requests(
         home.path(),
         &[
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_transaction","arguments":{"project":"local","chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","alias":"deployer","wait":true,"timeout_secs":30}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_transaction","arguments":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","alias":"deployer","wait":true,"timeout_secs":30}}}"#,
         ],
     );
     assert!(

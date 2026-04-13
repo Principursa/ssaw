@@ -416,7 +416,7 @@ Unlock a passphrase-protected project for the lifetime of the server process:
 cargo run -- --project dex serve --prompt-passphrase
 ```
 
-`ssaw serve` speaks line-oriented JSON-RPC 2.0 over stdio and implements the MCP handshake. Within one server process, requests are handled sequentially.
+`ssaw serve` speaks line-oriented JSON-RPC 2.0 over stdio and implements the MCP handshake. Each server process is scoped to its selected project, and requests are handled sequentially.
 
 When started with `--prompt-passphrase`, the server keeps that passphrase only in process memory. It is not written back to disk with the seed.
 
@@ -448,11 +448,9 @@ Address-targeting tools accept either:
 - `index`
 - `alias`
 
-Most tools also accept an optional `project` field so one server process can target different projects explicitly.
+Server tool calls act on the project selected when `serve` started. If you need another project, start another server with a different `--project` selection.
 
-If the server was started with `--prompt-passphrase`, keep requests on that selected project. In-memory unlock state is tied to the project the server started against.
-
-Signer-targeting tool responses include alias/index metadata when available. Chain-management responses do not echo stored RPC endpoints.
+Signer-targeting tool responses include alias/index metadata when available. Chain-management responses do not echo stored RPC endpoints. `doctor` reports `passphrase_required`, `signer_unlocked`, and `server_project_scope` so an agent can tell whether signer-dependent operations are currently available.
 
 ### Minimal Handshake Example
 
@@ -470,7 +468,7 @@ printf '%s\n' \
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_address","arguments":{"project":"dex","alias":"deployer"}}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_address","arguments":{"alias":"deployer"}}}' \
   | cargo run -- serve
 ```
 

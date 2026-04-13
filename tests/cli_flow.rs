@@ -179,7 +179,7 @@ fn serve_supports_mcp_tools_and_alias_metadata() {
         home.path(),
         &[
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_address","arguments":{"project":"dex","alias":"deployer"}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_address","arguments":{"alias":"deployer"}}}"#,
         ],
     );
     assert!(
@@ -237,10 +237,10 @@ fn serve_supports_chain_management_and_doctor_tools() {
         home.path(),
         &[
             r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_chains","arguments":{"project":"dex"}}}"#,
-            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"add_chain","arguments":{"project":"dex","name":"local","chain_id":31337,"rpc_url":"http://127.0.0.1:8545"}}}"#,
-            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_chains","arguments":{"project":"dex"}}}"#,
-            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"doctor","arguments":{"project":"dex"}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_chains","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"add_chain","arguments":{"name":"local","chain_id":31337,"rpc_url":"http://127.0.0.1:8545"}}}"#,
+            r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"list_chains","arguments":{}}}"#,
+            r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"doctor","arguments":{}}}"#,
         ],
     );
     assert!(
@@ -299,6 +299,14 @@ fn serve_supports_chain_management_and_doctor_tools() {
         serde_json::json!("dex")
     );
     assert_eq!(
+        responses[5]["result"]["structuredContent"]["server_project_scope"],
+        serde_json::json!("single-project")
+    );
+    assert_eq!(
+        responses[5]["result"]["structuredContent"]["signer_unlocked"],
+        serde_json::json!(true)
+    );
+    assert_eq!(
         responses[5]["result"]["structuredContent"]["seed_exists"],
         serde_json::json!(true)
     );
@@ -330,7 +338,7 @@ fn serve_unknown_chain_error_includes_project_context_and_hint() {
     let output = run_server_requests(
         home.path(),
         &[
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_transaction","arguments":{"project":"dex","chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_transaction","arguments":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1"}}}"#,
         ],
     );
     assert!(
@@ -428,8 +436,8 @@ fn mcp_invalid_rpc_url_error_does_not_echo_configured_url() {
     let output = run_server_requests(
         home.path(),
         &[
-            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add_chain","arguments":{"project":"dex","name":"local","chain_id":31337,"rpc_url":"not-a-url?api_key=super-secret"}}}"#,
-            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_transaction","arguments":{"project":"dex","chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1"}}}"#,
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"add_chain","arguments":{"name":"local","chain_id":31337,"rpc_url":"not-a-url?api_key=super-secret"}}}"#,
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"send_transaction","arguments":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1"}}}"#,
         ],
     );
     assert!(
@@ -449,4 +457,40 @@ fn mcp_invalid_rpc_url_error_does_not_echo_configured_url() {
         .expect("error");
     assert!(error.contains("invalid rpc url in configured chain"));
     assert!(!error.contains("not-a-url?api_key=super-secret"));
+}
+
+#[test]
+fn serve_rejects_project_override_in_single_project_mode() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"doctor","arguments":{"project":"launchpad"}}}"#,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    let error = responses[1]["result"]["structuredContent"]["error"]
+        .as_str()
+        .expect("error");
+    assert!(error.contains("project override is not supported"));
 }

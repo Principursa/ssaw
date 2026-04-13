@@ -70,7 +70,6 @@ struct CallToolParams {
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct AddressParams {
-    project: Option<String>,
     index: Option<u32>,
     alias: Option<String>,
 }
@@ -78,15 +77,12 @@ struct AddressParams {
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct ListAddressesParams {
-    project: Option<String>,
     count: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
-struct ProjectParams {
-    project: Option<String>,
-}
+struct EmptyParams {}
 
 #[derive(Debug, Deserialize)]
 struct AddChainParams {
@@ -445,16 +441,15 @@ fn tool_definitions() -> Vec<Value> {
     vec![
         json!({
             "name": "get_address",
-            "description": "Derive a single wallet address from the selected project by index or alias.",
-            "inputSchema": address_target_schema("Optional project override plus either an address index or a project-local alias.")
+            "description": "Derive a single wallet address from the selected server project by index or alias.",
+            "inputSchema": address_target_schema("Provide either an address index or a project-local alias.")
         }),
         json!({
             "name": "list_addresses",
-            "description": "List derived wallet addresses for the selected project.",
+            "description": "List derived wallet addresses for the selected server project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Optional project override." },
                     "count": { "type": "integer", "minimum": 1, "maximum": 20, "description": "How many addresses to derive." }
                 },
                 "additionalProperties": false
@@ -462,22 +457,19 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "list_chains",
-            "description": "List configured chains for the selected project. Chain configuration is project-local.",
+            "description": "List configured chains for the selected server project. Chain configuration is project-local.",
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "project": { "type": "string", "description": "Optional project override." }
-                },
+                "properties": {},
                 "additionalProperties": false
             }
         }),
         json!({
             "name": "add_chain",
-            "description": "Add or update a project-local chain configuration so transaction and contract tools can use it.",
+            "description": "Add or update a chain configuration for the selected server project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Optional project override." },
                     "name": { "type": "string", "description": "Chain alias within the selected project." },
                     "chain_id": { "type": "integer", "minimum": 0, "description": "Numeric chain id." },
                     "rpc_url": { "type": "string", "description": "RPC endpoint URL to store for this chain." }
@@ -488,12 +480,10 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "doctor",
-            "description": "Return the resolved project context, wallet file presence, aliases, and configured chain names and ids for debugging agent workflows.",
+            "description": "Return the resolved server project context, signer lock status, wallet file presence, aliases, and configured chain names and ids.",
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "project": { "type": "string", "description": "Optional project override." }
-                },
+                "properties": {},
                 "additionalProperties": false
             }
         }),
@@ -516,11 +506,10 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "send_transaction",
-            "description": "Send a native ETH transaction or raw calldata transaction on a configured chain. Use `list_chains` or `add_chain` first if the target project has not registered that chain yet.",
+            "description": "Send a native ETH transaction or raw calldata transaction on a configured chain for the selected server project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Optional project override." },
                     "chain": chain_schema(),
                     "to": { "type": "string", "description": "Destination address." },
                     "value_wei": { "type": "string", "description": "Native value in wei as a decimal string." },
@@ -536,11 +525,10 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "read_contract",
-            "description": "Run an eth_call against a contract and decode outputs using a provided ABI. The selected chain must already be configured for the target project.",
+            "description": "Run an eth_call against a contract on the selected server project and decode outputs using a provided ABI.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Optional project override." },
                     "chain": chain_schema(),
                     "address": { "type": "string", "description": "Contract address." },
                     "function": { "type": "string", "description": "Function name to call." },
@@ -557,11 +545,10 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "write_contract",
-            "description": "Sign and submit a contract write transaction using a provided ABI. The selected chain must already be configured for the target project.",
+            "description": "Sign and submit a contract write transaction on the selected server project using a provided ABI.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "project": { "type": "string", "description": "Optional project override." },
                     "chain": chain_schema(),
                     "address": { "type": "string", "description": "Contract address." },
                     "function": { "type": "string", "description": "Function name to call." },
@@ -589,7 +576,6 @@ fn address_target_schema(description: &str) -> Value {
         "type": "object",
         "description": description,
         "properties": {
-            "project": { "type": "string", "description": "Optional project override." },
             "index": { "type": "integer", "minimum": 0, "description": "Signer derivation index." },
             "alias": { "type": "string", "description": "Project-local alias for the signer." }
         },
@@ -599,10 +585,6 @@ fn address_target_schema(description: &str) -> Value {
 
 fn sign_schema(extra_properties: Value, required: Vec<&str>) -> Value {
     let mut properties = serde_json::Map::new();
-    properties.insert(
-        "project".to_owned(),
-        json!({ "type": "string", "description": "Optional project override." }),
-    );
     properties.insert(
         "index".to_owned(),
         json!({ "type": "integer", "minimum": 0, "description": "Signer derivation index." }),
@@ -643,7 +625,7 @@ async fn dispatch_wallet_method(
     method: &str,
     params: &Value,
 ) -> Result<Value> {
-    let paths = request_paths(paths, params, state.session_passphrase.is_some())?;
+    request_paths(params)?;
     let session_passphrase = state
         .session_passphrase
         .as_ref()
@@ -661,7 +643,7 @@ async fn dispatch_wallet_method(
         "list_addresses" => parse_params::<ListAddressesParams>(params)
             .and_then(|params| wallet::list_addresses(&paths, params.count, session_passphrase))
             .map(|addresses| json!({ "addresses": addresses })),
-        "list_chains" => parse_params::<ProjectParams>(params)
+        "list_chains" => parse_params::<EmptyParams>(params)
             .and_then(|_| crate::chain::load(&paths))
             .map(|config| {
                 let chains: Vec<Value> = config
@@ -676,7 +658,8 @@ async fn dispatch_wallet_method(
             crate::chain::resolve(&paths, &crate::chain::ChainSelector::Name(params.name.clone()))
                 .map(|entry| chain_summary_json(&params.name, entry.chain_id))
         }),
-        "doctor" => parse_params::<ProjectParams>(params).and_then(|_| doctor(&paths)),
+        "doctor" => parse_params::<EmptyParams>(params)
+            .and_then(|_| doctor(&paths, state.session_passphrase.is_some())),
         "sign_message" => parse_params::<SignMessageParams>(params).and_then(|params| {
             let target =
                 wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
@@ -830,18 +813,12 @@ fn signer_scoped_transaction_result(
     Ok(Value::Object(result))
 }
 
-fn request_paths(base_paths: &Paths, params: &Value, session_unlocked: bool) -> Result<Paths> {
+fn request_paths(params: &Value) -> Result<()> {
     match params.get("project") {
-        Some(Value::String(project_name)) => {
-            if session_unlocked && project_name != &base_paths.project_name {
-                bail!(
-                    "project override is not supported while `ssaw serve` is running with an in-memory passphrase; start the server with the target project selected"
-                );
-            }
-            Paths::discover_with_project(Some(project_name))
-        }
-        Some(_) => bail!("project must be a string"),
-        None => Ok(base_paths.clone()),
+        Some(_) => bail!(
+            "project override is not supported in `ssaw serve`; start the server with the target project selected"
+        ),
+        None => Ok(()),
     }
 }
 
@@ -861,10 +838,15 @@ fn with_project_context(paths: &Paths, value: Value) -> Value {
     }
 }
 
-fn doctor(paths: &Paths) -> Result<Value> {
+fn doctor(paths: &Paths, signer_unlocked: bool) -> Result<Value> {
     let identity_path = paths.identity_file()?;
     let aliases = crate::alias::list_aliases(paths)?;
     let chain_config = crate::chain::load(paths)?;
+    let passphrase_required = if paths.seed_file.exists() {
+        wallet::passphrase_required(paths)?
+    } else {
+        false
+    };
     let chains: Vec<Value> = chain_config
         .chains
         .into_iter()
@@ -882,6 +864,9 @@ fn doctor(paths: &Paths) -> Result<Value> {
         "addresses_file": paths.addresses_file.display().to_string(),
         "seed_exists": paths.seed_file.exists(),
         "identity_exists": identity_path.exists(),
+        "server_project_scope": "single-project",
+        "passphrase_required": passphrase_required,
+        "signer_unlocked": !passphrase_required || signer_unlocked,
         "aliases": aliases,
         "chains": chains
     }))
@@ -950,23 +935,32 @@ mod tests {
     }
 
     #[test]
-    fn rejects_non_string_project_override() {
-        let paths = Paths::discover().expect("paths");
-        let error =
-            request_paths(&paths, &json!({ "project": 1 }), false).expect_err("project error");
-        assert!(error.to_string().contains("project must be a string"));
-    }
-
-    #[test]
-    fn rejects_project_override_while_session_unlock_is_active() {
-        let paths = Paths::discover_with_project(Some("dex")).expect("paths");
-        let error = request_paths(&paths, &json!({ "project": "launchpad" }), true)
-            .expect_err("project override error");
+    fn rejects_project_override() {
+        let error = request_paths(&json!({ "project": "dex" })).expect_err("project error");
         assert!(
             error
                 .to_string()
                 .contains("project override is not supported")
         );
+    }
+
+    #[test]
+    fn doctor_reports_locked_status_for_passphrase_project() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = temp_paths(&temp, "dex");
+        paths.ensure_parent_dirs().expect("dirs");
+        crate::wallet::ensure_identity(&paths).expect("identity");
+        crate::wallet::import(
+            &paths,
+            "test test test test test test test test test test test junk",
+            Some("secret"),
+        )
+        .expect("import");
+
+        let doctor = doctor(&paths, false).expect("doctor");
+        assert_eq!(doctor["server_project_scope"], "single-project");
+        assert_eq!(doctor["passphrase_required"], json!(true));
+        assert_eq!(doctor["signer_unlocked"], json!(false));
     }
 
     #[tokio::test]

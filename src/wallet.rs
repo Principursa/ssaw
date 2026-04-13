@@ -120,15 +120,12 @@ struct SeedPayload {
     mnemonic: String,
     #[serde(default)]
     passphrase_required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    passphrase: Option<String>,
 }
 
 #[derive(Debug)]
 struct LoadedSeedPayload {
     mnemonic: Zeroizing<String>,
     passphrase_required: bool,
-    legacy_passphrase: Option<Zeroizing<String>>,
 }
 
 pub fn init(paths: &Paths) -> Result<(String, WalletSummary)> {
@@ -442,7 +439,6 @@ fn persist_phrase(paths: &Paths, phrase: &str, passphrase_required: bool) -> Res
     let payload = SeedPayload {
         mnemonic: phrase.to_owned(),
         passphrase_required,
-        passphrase: None,
     };
     let body =
         Zeroizing::new(toml::to_string(&payload).context("failed to serialize seed payload")?);
@@ -511,11 +507,9 @@ fn normalize_phrase(phrase: &str) -> Result<String> {
 
 impl From<SeedPayload> for LoadedSeedPayload {
     fn from(payload: SeedPayload) -> Self {
-        let legacy_passphrase = payload.passphrase.map(Zeroizing::new);
         Self {
             mnemonic: Zeroizing::new(payload.mnemonic),
-            passphrase_required: payload.passphrase_required || legacy_passphrase.is_some(),
-            legacy_passphrase,
+            passphrase_required: payload.passphrase_required,
         }
     }
 }
@@ -525,10 +519,6 @@ fn select_bip39_passphrase<'a>(
     payload: &'a LoadedSeedPayload,
     runtime_passphrase: Option<&'a str>,
 ) -> Result<Option<&'a str>> {
-    if let Some(passphrase) = payload.legacy_passphrase.as_ref() {
-        return Ok(Some(passphrase.as_str()));
-    }
-
     if payload.passphrase_required {
         let message = format!(
             "project `{}` requires a BIP-39 passphrase; rerun with --prompt-passphrase or restart `ssaw serve` with --prompt-passphrase",
@@ -538,6 +528,10 @@ fn select_bip39_passphrase<'a>(
     }
 
     Ok(None)
+}
+
+pub fn passphrase_required(paths: &Paths) -> Result<bool> {
+    Ok(load_payload(paths)?.passphrase_required)
 }
 
 fn parse_address(value: &str) -> Result<Address> {
