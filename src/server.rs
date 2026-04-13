@@ -156,6 +156,23 @@ struct WriteContractParams {
     alias: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ForgeParams {
+    args: Vec<String>,
+    #[serde(default)]
+    chain: Option<String>,
+    #[serde(default)]
+    index: Option<u32>,
+    #[serde(default)]
+    alias: Option<String>,
+    #[serde(default = "default_forge_timeout_secs")]
+    timeout_secs: u64,
+}
+
+fn default_forge_timeout_secs() -> u64 {
+    300
+}
+
 #[derive(Default)]
 struct ServerState {
     initialized: bool,
@@ -434,6 +451,7 @@ fn tool_exists(name: &str) -> bool {
             | "send_transaction"
             | "read_contract"
             | "write_contract"
+            | "forge"
     )
 }
 
@@ -565,6 +583,26 @@ fn tool_definitions() -> Vec<Value> {
                     "alias": { "type": "string", "description": "Signer alias within the selected project." }
                 },
                 "required": ["chain", "address", "function", "abi"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
+            "name": "forge",
+            "description": "Run a forge command using a project wallet signer with transient keystore injection. The forge binary must be in PATH.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "args": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Forge arguments, e.g. [\"script\", \"Deploy.s.sol\", \"--broadcast\"]."
+                    },
+                    "chain": chain_schema(),
+                    "index": { "type": "integer", "minimum": 0, "description": "Signer derivation index." },
+                    "alias": { "type": "string", "description": "Signer alias within the selected project." },
+                    "timeout_secs": { "type": "integer", "minimum": 1, "description": "Subprocess timeout in seconds (default 300)." }
+                },
+                "required": ["args"],
                 "additionalProperties": false
             }
         }),
@@ -731,6 +769,33 @@ async fn dispatch_wallet_method(
             )
             .await?;
             signer_scoped_transaction_result(&paths, &target, sent, session_passphrase)
+        }
+        "forge" => {
+            let params = parse_params::<ForgeParams>(params)?;
+            let target =
+                wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
+            let output = crate::forge::run(
+                &paths,
+                crate::forge::ForgeOptions {
+                    args: &params.args,
+                    chain: params.chain.as_deref(),
+                    index: target.index,
+                    timeout_secs: params.timeout_secs,
+                    runtime_passphrase: session_passphrase,
+                },
+            )
+            .await?;
+            let aliases = wallet::aliases_for_index(&paths, target.index)?;
+            let address = wallet::derive_address(&paths, target.index, session_passphrase)?;
+            Ok(json!({
+                "address": address,
+                "index": target.index,
+                "alias": target.alias,
+                "aliases": aliases,
+                "exit_code": output.exit_code,
+                "stdout": output.stdout,
+                "stderr": output.stderr
+            }))
         }
         _ => bail!("unknown method `{method}`"),
     }?;
