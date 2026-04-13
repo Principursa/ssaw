@@ -89,12 +89,12 @@ impl WaitOptions {
     }
 }
 
-struct WriteGuard {
+pub(crate) struct WriteGuard {
     file: File,
 }
 
 impl WriteGuard {
-    fn acquire(paths: &Paths) -> Result<Self> {
+    pub(crate) fn acquire(paths: &Paths) -> Result<Self> {
         paths.ensure_parent_dirs()?;
         let file = File::create(&paths.lock_file)
             .with_context(|| format!("failed to open {}", paths.lock_file.display()))?;
@@ -407,7 +407,7 @@ pub fn read_secret_line(prompt: &str) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(value))
 }
 
-fn signer_for_index(
+pub(crate) fn signer_for_index(
     paths: &Paths,
     index: u32,
     runtime_passphrase: Option<&str>,
