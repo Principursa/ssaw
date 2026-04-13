@@ -37,6 +37,7 @@ enum Command {
     WriteContract(WriteContractArgs),
     Doctor,
     Serve(ServeArgs),
+    Forge(ForgeArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -208,6 +209,20 @@ struct ServeArgs {
     passphrase: PromptPassphraseArgs,
 }
 
+#[derive(Debug, Args)]
+struct ForgeArgs {
+    #[command(flatten)]
+    target: AddressTargetArgs,
+    #[arg(long)]
+    chain: Option<String>,
+    #[arg(long, default_value_t = 300)]
+    timeout_secs: u64,
+    #[command(flatten)]
+    passphrase: PromptPassphraseArgs,
+    #[arg(last = true)]
+    forge_args: Vec<String>,
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::discover_with_project(cli.project.as_deref())?;
@@ -227,6 +242,7 @@ pub async fn run() -> Result<()> {
         Command::WriteContract(args) => cmd_write_contract(&paths, args).await,
         Command::Doctor => cmd_doctor(&paths),
         Command::Serve(args) => cmd_serve(&paths, args).await,
+        Command::Forge(args) => cmd_forge(&paths, args).await,
     }
 }
 
@@ -579,6 +595,45 @@ fn cmd_doctor(paths: &Paths) -> Result<()> {
 async fn cmd_serve(paths: &Paths, args: ServeArgs) -> Result<()> {
     let passphrase = maybe_prompt_passphrase(&args.passphrase)?;
     server::run(paths, passphrase).await
+}
+
+async fn cmd_forge(paths: &Paths, args: ForgeArgs) -> Result<()> {
+    if args.forge_args.is_empty() {
+        bail!("no forge arguments provided; usage: ssaw forge [OPTIONS] -- <forge args...>");
+    }
+
+    let target =
+        wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
+    let passphrase = maybe_prompt_passphrase(&args.passphrase)?;
+
+    let output = crate::forge::run(
+        paths,
+        crate::forge::ForgeOptions {
+            args: &args.forge_args,
+            chain: args.chain.as_deref(),
+            index: target.index,
+            timeout_secs: args.timeout_secs,
+            runtime_passphrase: passphrase.as_ref().map(|v| v.as_str()),
+        },
+    )
+    .await?;
+
+    use std::io::Write;
+    let mut stdout = std::io::stdout();
+    stdout
+        .write_all(output.stdout.as_bytes())
+        .context("failed to write forge stdout")?;
+
+    let mut stderr = std::io::stderr();
+    stderr
+        .write_all(output.stderr.as_bytes())
+        .context("failed to write forge stderr")?;
+
+    if output.exit_code != 0 {
+        std::process::exit(output.exit_code);
+    }
+
+    Ok(())
 }
 
 fn exists_marker(path: &std::path::Path) -> &'static str {
