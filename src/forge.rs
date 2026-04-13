@@ -6,6 +6,7 @@ use anyhow::{Context, Result, bail};
 use rand::Rng;
 use serde::Serialize;
 use tokio::process::Command;
+use zeroize::Zeroizing;
 
 use crate::chain::{self, ChainSelector};
 use crate::config::Paths;
@@ -46,11 +47,13 @@ impl TransientKeystore {
                 .context("failed to set temp directory permissions")?;
         }
 
-        let password: String = rand::thread_rng()
-            .sample_iter(&rand::distributions::Alphanumeric)
-            .take(32)
-            .map(char::from)
-            .collect();
+        let password = Zeroizing::new(
+            rand::thread_rng()
+                .sample_iter(&rand::distributions::Alphanumeric)
+                .take(32)
+                .map(char::from)
+                .collect::<String>(),
+        );
 
         let keystore_path = dir.path().join("key.json");
         let password_file_path = dir.path().join("password");
@@ -59,13 +62,20 @@ impl TransientKeystore {
             dir.path(),
             &mut rand::thread_rng(),
             signer.credential().to_bytes(),
-            &password,
+            password.as_str(),
             Some("key"),
         )
         .context("failed to encrypt keystore")?;
 
         std::fs::write(&password_file_path, password.as_bytes())
             .context("failed to write keystore password file")?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&password_file_path, std::fs::Permissions::from_mode(0o600))
+                .context("failed to set password file permissions")?;
+        }
 
         Ok(Self {
             _dir: dir,
@@ -82,6 +92,7 @@ pub async fn run(paths: &Paths, options: ForgeOptions<'_>) -> Result<ForgeOutput
     let signer = wallet::signer_for_index(paths, options.index, options.runtime_passphrase)?;
     let sender = format!("{:#x}", signer.address());
     let keystore = TransientKeystore::create(&signer)?;
+    drop(signer);
 
     let rpc_url = match options.chain {
         Some(chain_value) => {
@@ -106,29 +117,41 @@ pub async fn run(paths: &Paths, options: ForgeOptions<'_>) -> Result<ForgeOutput
         options.timeout_secs
     });
 
-    let child = Command::new("forge")
+    let mut child = Command::new("forge")
         .args(&args)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .context("failed to spawn forge process")?;
 
-    let child_id = child.id();
-    let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    let stdout_handle = child.stdout.take();
+    let stderr_handle = child.stderr.take();
 
-    match result {
-        Ok(Ok(output)) => Ok(ForgeOutput {
-            exit_code: output.status.code().unwrap_or(-1),
-            stdout: truncate_output(&output.stdout),
-            stderr: truncate_output(&output.stderr),
+    let collect = async {
+        use tokio::io::AsyncReadExt;
+
+        let mut stdout_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+
+        if let Some(mut handle) = stdout_handle {
+            handle.read_to_end(&mut stdout_buf).await.ok();
+        }
+        if let Some(mut handle) = stderr_handle {
+            handle.read_to_end(&mut stderr_buf).await.ok();
+        }
+
+        let status = child.wait().await.context("failed to wait for forge process")?;
+        Ok::<_, anyhow::Error>((status, stdout_buf, stderr_buf))
+    };
+
+    match tokio::time::timeout(timeout, collect).await {
+        Ok(Ok((status, stdout_buf, stderr_buf))) => Ok(ForgeOutput {
+            exit_code: status.code().unwrap_or(-1),
+            stdout: truncate_output(&stdout_buf),
+            stderr: truncate_output(&stderr_buf),
         }),
         Ok(Err(error)) => bail!("forge process failed: {error}"),
         Err(_) => {
-            if let Some(pid) = child_id {
-                let _ = std::process::Command::new("kill")
-                    .arg(pid.to_string())
-                    .status();
-            }
             bail!(
                 "forge process timed out after {} seconds",
                 timeout.as_secs()
