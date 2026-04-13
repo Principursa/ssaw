@@ -27,6 +27,7 @@ SSAW is not trying to be a hardened enclave. It is trying to be a practical loca
 - runtime ABI contract writes
 - stdio MCP server with wallet tools
 - cross-process write locking for transaction submission
+- Foundry integration via transient keystore injection
 
 ## When To Use Which Mode
 
@@ -48,41 +49,46 @@ The important point is that both modes use the same underlying wallet state and 
 
 ## Quick Start
 
-If you are using a local checkout, run SSAW with Cargo:
+Install SSAW via Nix:
 
 ```sh
-cargo run -- --help
+nix profile install github:Cifr/ssaw
+```
+
+Or enter the development shell:
+
+```sh
+nix develop github:Cifr/ssaw
+```
+
+Show available commands:
+
+```sh
+ssaw --help
 ```
 
 Initialize a wallet:
 
 ```sh
-cargo run -- init
+ssaw init
 ```
 
 Create and select a project:
 
 ```sh
-cargo run -- project init dex
+ssaw project init dex
 ```
 
 Add a chain:
 
 ```sh
-printf '%s' 'http://127.0.0.1:8545' | cargo run -- add-chain local 31337 --rpc-url-stdin
+printf '%s' 'http://127.0.0.1:8545' | ssaw add-chain local 31337 --rpc-url-stdin
 ```
 
 Start the MCP server for that project:
 
 ```sh
-cargo run -- --project dex serve
-```
-
-If you want a built binary instead of `cargo run`, build the crate and run the executable directly:
-
-```sh
-cargo build --release
-./target/release/ssaw --help
+ssaw --project dex serve
 ```
 
 ## First-Time Setup
@@ -90,7 +96,7 @@ cargo build --release
 Initialize a new wallet in the current project:
 
 ```sh
-cargo run -- init
+ssaw init
 ```
 
 That will:
@@ -104,13 +110,13 @@ That will:
 Import an existing mnemonic from stdin:
 
 ```sh
-printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- import
+printf '%s\n' 'test test test test test test test test test test test junk' | ssaw import
 ```
 
 Import a mnemonic that uses a BIP-39 passphrase:
 
 ```sh
-printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- import --prompt-passphrase
+printf '%s\n' 'test test test test test test test test test test test junk' | ssaw import --prompt-passphrase
 ```
 
 The passphrase is not persisted with the seed. Prompt for it on signer-dependent CLI commands, or unlock `serve` at startup for a smoother agent workflow.
@@ -118,7 +124,7 @@ The passphrase is not persisted with the seed. Prompt for it on signer-dependent
 Check where SSAW is storing state:
 
 ```sh
-cargo run -- doctor
+ssaw doctor
 ```
 
 ## Nix
@@ -180,13 +186,13 @@ The `default` project lives directly under `~/.ssaw/`. Named projects live under
 Create and select a new project:
 
 ```sh
-cargo run -- project init dex
+ssaw project init dex
 ```
 
 Import directly into a named project:
 
 ```sh
-printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- project import dex
+printf '%s\n' 'test test test test test test test test test test test junk' | ssaw project import dex
 ```
 
 If that project uses a BIP-39 passphrase, add `--prompt-passphrase`.
@@ -194,22 +200,22 @@ If that project uses a BIP-39 passphrase, add `--prompt-passphrase`.
 Switch projects:
 
 ```sh
-cargo run -- project use default
-cargo run -- project use dex
+ssaw project use default
+ssaw project use dex
 ```
 
 Inspect project state:
 
 ```sh
-cargo run -- project list
-cargo run -- project current
+ssaw project list
+ssaw project current
 ```
 
 Override the active project for a single command:
 
 ```sh
-cargo run -- --project dex address
-cargo run -- --project dex serve
+ssaw --project dex address
+ssaw --project dex serve
 ```
 
 Recommended daily flow:
@@ -225,19 +231,19 @@ Recommended daily flow:
 Derive the default address:
 
 ```sh
-cargo run -- address
+ssaw address
 ```
 
 If the project requires a BIP-39 passphrase:
 
 ```sh
-cargo run -- address --prompt-passphrase
+ssaw address --prompt-passphrase
 ```
 
 Derive another index:
 
 ```sh
-cargo run -- address --index 1
+ssaw address --index 1
 ```
 
 ### Aliases
@@ -247,26 +253,26 @@ Aliases are project-local names for derivation indices.
 Create an alias:
 
 ```sh
-cargo run -- alias set deployer --index 0 --label deployer --label admin
+ssaw alias set deployer --index 0 --label deployer --label admin
 ```
 
 List aliases:
 
 ```sh
-cargo run -- alias list
+ssaw alias list
 ```
 
 Show one alias:
 
 ```sh
-cargo run -- alias show deployer
+ssaw alias show deployer
 ```
 
 Use an alias anywhere an address target is accepted:
 
 ```sh
-cargo run -- address --alias deployer
-cargo run -- sign-message "hello" --alias deployer
+ssaw address --alias deployer
+ssaw sign-message "hello" --alias deployer
 ```
 
 ### Signing
@@ -274,13 +280,13 @@ cargo run -- sign-message "hello" --alias deployer
 Sign a plain message:
 
 ```sh
-cargo run -- sign-message "hello"
+ssaw sign-message "hello"
 ```
 
 Sign EIP-712 typed data from stdin:
 
 ```sh
-printf '%s' '{"types":{"EIP712Domain":[{"name":"name","type":"string"}],"Mail":[{"name":"contents","type":"string"}]},"primaryType":"Mail","domain":{"name":"SSAW"},"message":{"contents":"hello"}}' | cargo run -- sign-typed-data
+printf '%s' '{"types":{"EIP712Domain":[{"name":"name","type":"string"}],"Mail":[{"name":"contents","type":"string"}]},"primaryType":"Mail","domain":{"name":"SSAW"},"message":{"contents":"hello"}}' | ssaw sign-typed-data
 ```
 
 ### Chains
@@ -288,13 +294,13 @@ printf '%s' '{"types":{"EIP712Domain":[{"name":"name","type":"string"}],"Mail":[
 Add a project-local chain:
 
 ```sh
-printf '%s' 'http://127.0.0.1:8545' | cargo run -- add-chain local 31337 --rpc-url-stdin
+printf '%s' 'http://127.0.0.1:8545' | ssaw add-chain local 31337 --rpc-url-stdin
 ```
 
 List configured chains:
 
 ```sh
-cargo run -- list-chains
+ssaw list-chains
 ```
 
 `list-chains` prints chain names and ids without echoing stored RPC endpoints.
@@ -306,7 +312,7 @@ Chain config is project-local. If `dex` and `launchpad` both use Anvil, each pro
 Send native ETH:
 
 ```sh
-cargo run -- send-transaction \
+ssaw send-transaction \
   --chain local \
   --to 0x000000000000000000000000000000000000dead \
   --value-wei 1
@@ -315,7 +321,7 @@ cargo run -- send-transaction \
 Wait for a receipt:
 
 ```sh
-cargo run -- send-transaction \
+ssaw send-transaction \
   --chain local \
   --to 0x000000000000000000000000000000000000dead \
   --value-wei 1 \
@@ -342,7 +348,7 @@ SSAW reads ABI JSON from stdin and accepts repeated `--arg` values as Solidity-l
 Read a contract function by name or signature:
 
 ```sh
-cat abi.json | cargo run -- read-contract \
+cat abi.json | ssaw read-contract \
   --chain local \
   --address 0xYourContract \
   --function balanceOf \
@@ -353,7 +359,7 @@ cat abi.json | cargo run -- read-contract \
 Write to a contract by name or signature:
 
 ```sh
-cat abi.json | cargo run -- write-contract \
+cat abi.json | ssaw write-contract \
   --chain local \
   --address 0xYourContract \
   --function transfer(address,uint256) \
@@ -365,7 +371,7 @@ cat abi.json | cargo run -- write-contract \
 Wait for a contract write receipt:
 
 ```sh
-cat abi.json | cargo run -- write-contract \
+cat abi.json | ssaw write-contract \
   --chain local \
   --address 0xYourContract \
   --function transfer(address,uint256) \
@@ -379,7 +385,7 @@ cat abi.json | cargo run -- write-contract \
 Attach native value to a payable call:
 
 ```sh
-cat abi.json | cargo run -- write-contract \
+cat abi.json | ssaw write-contract \
   --chain local \
   --address 0xYourContract \
   --function deposit() \
@@ -397,24 +403,44 @@ Current behavior:
 - `write-contract` returns only `tx_hash` by default
 - with `--wait`, it returns JSON including confirmation state and receipt summary
 
+### Foundry Integration
+
+SSAW can run `forge` commands using project wallet keys via transient keystore injection. The agent never handles keys or passwords directly.
+
+Run a forge script with the project deployer:
+
+```sh
+ssaw forge --alias deployer --chain local -- script Deploy.s.sol --broadcast
+```
+
+SSAW injects `--keystore`, `--password-file`, `--sender`, and `--rpc-url` into the forge command automatically. If you provide any of those flags yourself, SSAW skips injection for that flag.
+
+The transient keystore is encrypted with a random password, exists only for the duration of the forge process, and is deleted on completion.
+
+The `forge` tool is also available through MCP:
+
+```json
+{"name":"forge","arguments":{"args":["script","Deploy.s.sol","--broadcast"],"chain":"local","alias":"deployer"}}
+```
+
 ## MCP Server Usage
 
 Run the stdio MCP server:
 
 ```sh
-cargo run -- serve
+ssaw serve
 ```
 
 Run it against a specific project:
 
 ```sh
-cargo run -- --project dex serve
+ssaw --project dex serve
 ```
 
 Unlock a passphrase-protected project for the lifetime of the server process:
 
 ```sh
-cargo run -- --project dex serve --prompt-passphrase
+ssaw --project dex serve --prompt-passphrase
 ```
 
 `ssaw serve` speaks line-oriented JSON-RPC 2.0 over stdio and implements the MCP handshake. Each server process is scoped to its selected project, and requests are handled sequentially.
@@ -443,6 +469,7 @@ Current wallet tools:
 - `send_transaction`
 - `read_contract`
 - `write_contract`
+- `forge`
 
 Address-targeting tools accept either:
 
@@ -460,7 +487,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | cargo run -- serve
+  | ssaw serve
 ```
 
 ### MCP `get_address` Example
@@ -470,7 +497,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_address","arguments":{"alias":"deployer"}}}' \
-  | cargo run -- serve
+  | ssaw serve
 ```
 
 ### MCP `send_transaction` Example
@@ -480,7 +507,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_transaction","arguments":{"chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","index":0}}}' \
-  | cargo run -- serve
+  | ssaw serve
 ```
 
 ### MCP `read_contract` Example
@@ -490,7 +517,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual-test","version":"0.1.0"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_contract","arguments":{"chain":"local","address":"0xYourContract","function":"balanceOf","abi":[{"type":"function","name":"balanceOf","stateMutability":"view","inputs":[{"name":"owner","type":"address"}],"outputs":[{"name":"","type":"uint256"}]}],"args":["0x000000000000000000000000000000000000dead"]}}}' \
-  | cargo run -- serve
+  | ssaw serve
 ```
 
 ## Common Workflow
@@ -498,10 +525,10 @@ printf '%s\n' \
 For a new user, the easiest path is:
 
 1. `nix develop`
-2. `cargo run -- project init <name>`
-3. `cargo run -- add-chain <chain-name> <chain-id> --rpc-url-stdin`
+2. `ssaw project init <name>`
+3. `ssaw add-chain <chain-name> <chain-id> --rpc-url-stdin`
 4. Use CLI commands directly while you validate addresses, aliases, signing, and chain setup
-5. Once that works, point your agent at `cargo run -- --project <name> serve`
+5. Once that works, point your agent at `ssaw --project <name> serve`
 
 That keeps the initial debugging human-readable and then shifts to MCP once the wallet state is known-good.
 
