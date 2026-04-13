@@ -479,7 +479,7 @@ fn tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "doctor",
-            "description": "Return the resolved project context, wallet file presence, aliases, and configured chains for debugging agent workflows.",
+            "description": "Return the resolved project context, wallet file presence, aliases, and configured chain names and ids for debugging agent workflows.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -649,26 +649,14 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
                 let chains: Vec<Value> = config
                     .chains
                     .into_iter()
-                    .map(|(name, entry)| {
-                        json!({
-                            "name": name,
-                            "chain_id": entry.chain_id,
-                            "rpc_url": entry.rpc_url
-                        })
-                    })
+                    .map(|(name, entry)| chain_summary_json(&name, entry.chain_id))
                     .collect();
                 json!({ "chains": chains })
             }),
         "add_chain" => parse_params::<AddChainParams>(params).and_then(|params| {
             crate::chain::add_chain(&paths, &params.name, params.chain_id, params.rpc_url)?;
             crate::chain::resolve(&paths, &crate::chain::ChainSelector::Name(params.name.clone()))
-                .map(|entry| {
-                    json!({
-                        "name": params.name,
-                        "chain_id": entry.chain_id,
-                        "rpc_url": entry.rpc_url
-                    })
-                })
+                .map(|entry| chain_summary_json(&params.name, entry.chain_id))
         }),
         "doctor" => parse_params::<ProjectParams>(params).and_then(|_| doctor(&paths)),
         "sign_message" => parse_params::<SignMessageParams>(params).and_then(|params| {
@@ -692,7 +680,7 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
             let selector = chain_selector_from_json(&params.chain)?;
             let target =
                 wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
-            wallet::send_transaction(
+            let sent = wallet::send_transaction(
                 &paths,
                 &selector,
                 &params.to,
@@ -701,8 +689,8 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
                 wallet::WaitOptions::from_flag(params.wait, params.timeout_secs),
                 target.index,
             )
-            .await
-            .map(|sent| serde_json::to_value(&sent).expect("sent tx serializes"))
+            .await?;
+            signer_scoped_transaction_result(&paths, &target, sent)
         }
         "read_contract" => {
             let params = parse_params::<ReadContractParams>(params)?;
@@ -727,7 +715,7 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
                 .context("failed to serialize contract ABI payload")?;
             let target =
                 wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
-            wallet::write_contract(
+            let sent = wallet::write_contract(
                 &paths,
                 &selector,
                 &params.address,
@@ -738,8 +726,8 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
                 wallet::WaitOptions::from_flag(params.wait, params.timeout_secs),
                 target.index,
             )
-            .await
-            .map(|sent| serde_json::to_value(&sent).expect("sent tx serializes"))
+            .await?;
+            signer_scoped_transaction_result(&paths, &target, sent)
         }
         _ => bail!("unknown method `{method}`"),
     }?;
@@ -775,6 +763,48 @@ fn default_timeout_secs() -> u64 {
     60
 }
 
+fn chain_summary_json(name: &str, chain_id: u64) -> Value {
+    json!({
+        "name": name,
+        "chain_id": chain_id
+    })
+}
+
+fn signer_scoped_transaction_result(
+    paths: &Paths,
+    target: &wallet::AddressTarget,
+    sent: wallet::SentTransaction,
+) -> Result<Value> {
+    let mut result = serde_json::Map::new();
+    result.insert(
+        "address".to_owned(),
+        Value::String(wallet::derive_address(paths, target.index)?),
+    );
+    result.insert("index".to_owned(), Value::from(target.index));
+    result.insert(
+        "alias".to_owned(),
+        target
+            .alias
+            .as_ref()
+            .map(|alias| Value::String(alias.clone()))
+            .unwrap_or(Value::Null),
+    );
+    result.insert(
+        "aliases".to_owned(),
+        serde_json::to_value(wallet::aliases_for_index(paths, target.index)?)
+            .expect("aliases serialize"),
+    );
+    result.insert("tx_hash".to_owned(), Value::String(sent.tx_hash));
+    result.insert("confirmed".to_owned(), Value::Bool(sent.confirmed));
+    if let Some(receipt) = sent.receipt {
+        result.insert(
+            "receipt".to_owned(),
+            serde_json::to_value(receipt).expect("receipt serializes"),
+        );
+    }
+    Ok(Value::Object(result))
+}
+
 fn request_paths(base_paths: &Paths, params: &Value) -> Result<Paths> {
     match params.get("project") {
         Some(Value::String(project_name)) => Paths::discover_with_project(Some(project_name)),
@@ -806,13 +836,7 @@ fn doctor(paths: &Paths) -> Result<Value> {
     let chains: Vec<Value> = chain_config
         .chains
         .into_iter()
-        .map(|(name, entry)| {
-            json!({
-                "name": name,
-                "chain_id": entry.chain_id,
-                "rpc_url": entry.rpc_url
-            })
-        })
+        .map(|(name, entry)| chain_summary_json(&name, entry.chain_id))
         .collect();
 
     Ok(json!({

@@ -381,7 +381,7 @@ fn cmd_list_chains(paths: &Paths) -> Result<()> {
     }
 
     for (name, entry) in config.chains {
-        println!("{name}\t{}\t{}", entry.chain_id, entry.rpc_url);
+        println!("{name}\t{}", entry.chain_id);
     }
     Ok(())
 }

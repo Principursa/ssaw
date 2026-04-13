@@ -23,6 +23,41 @@ fn ssaw_cmd(home: &std::path::Path) -> Command {
     cmd
 }
 
+fn run_server_requests(home: &std::path::Path, requests: &[&str]) -> std::process::Output {
+    ssaw_cmd(home)
+        .args(["serve"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map(|mut child| {
+            use std::io::Write;
+
+            let mut stdin = child.stdin.take().expect("stdin");
+            stdin
+                .write_all(
+                    br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}"#,
+                )
+                .expect("write initialize");
+            stdin.write_all(b"\n").expect("write newline");
+            stdin
+                .write_all(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+                .expect("write initialized notification");
+            stdin.write_all(b"\n").expect("write newline");
+
+            for request in requests {
+                stdin
+                    .write_all(request.as_bytes())
+                    .expect("write request");
+                stdin.write_all(b"\n").expect("write newline");
+            }
+
+            drop(stdin);
+            child.wait_with_output().expect("wait output")
+        })
+        .expect("run server")
+}
+
 #[tokio::test]
 async fn send_and_contract_wait_flow() {
     let home = TempDir::new().expect("temp home");
@@ -162,6 +197,79 @@ async fn send_and_contract_wait_flow() {
         String::from_utf8_lossy(&read_after.stderr)
     );
     assert!(String::from_utf8_lossy(&read_after.stdout).contains("[\"1\"]"));
+
+    let _ = anvil.kill();
+    let _ = anvil.wait();
+}
+
+#[tokio::test]
+async fn server_transaction_tools_include_signer_alias_metadata() {
+    let home = TempDir::new().expect("temp home");
+    let port = free_port();
+    let mut anvil = spawn_anvil(port);
+    let endpoint = format!("http://127.0.0.1:{port}");
+    wait_for_anvil(port);
+
+    let import = ssaw_cmd(home.path())
+        .args(["project", "import", "local"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn import");
+    feed_stdin_and_wait(import, TEST_MNEMONIC);
+
+    let alias = ssaw_cmd(home.path())
+        .args([
+            "alias", "set", "deployer", "--index", "0", "--label", "deployer",
+        ])
+        .output()
+        .expect("set alias");
+    assert!(
+        alias.status.success(),
+        "{}",
+        String::from_utf8_lossy(&alias.stderr)
+    );
+
+    let add_chain = ssaw_cmd(home.path())
+        .args(["add-chain", "local", "31337", "--rpc-url-stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn add-chain");
+    feed_stdin_and_wait(add_chain, &endpoint);
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_transaction","arguments":{"project":"local","chain":"local","to":"0x000000000000000000000000000000000000dead","value_wei":"1","alias":"deployer","wait":true,"timeout_secs":30}}}"#,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 2);
+
+    let structured = &responses[1]["result"]["structuredContent"];
+    assert_eq!(structured["project"], "local");
+    assert_eq!(structured["alias"], "deployer");
+    assert_eq!(structured["index"], serde_json::json!(0));
+    assert_eq!(structured["aliases"], serde_json::json!(["deployer"]));
+    assert!(
+        structured["address"]
+            .as_str()
+            .expect("signer address")
+            .starts_with("0x")
+    );
+    assert_eq!(structured["confirmed"], serde_json::json!(true));
 
     let _ = anvil.kill();
     let _ = anvil.wait();

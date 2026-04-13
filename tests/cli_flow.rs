@@ -98,6 +98,58 @@ fn project_and_alias_flow() {
 }
 
 #[test]
+fn list_chains_cli_does_not_echo_rpc_url() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let add_chain = ssaw_cmd(home.path())
+        .args(["add-chain", "local", "31337", "--rpc-url-stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map(|mut child| {
+            use std::io::Write;
+
+            let mut stdin = child.stdin.take().expect("stdin");
+            stdin
+                .write_all(b"http://127.0.0.1:8545")
+                .expect("write rpc url");
+            drop(stdin);
+            child.wait_with_output().expect("wait output")
+        })
+        .expect("spawn add-chain");
+    assert!(
+        add_chain.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add_chain.stderr)
+    );
+
+    let list = ssaw_cmd(home.path())
+        .args(["list-chains"])
+        .output()
+        .expect("list chains");
+    assert!(
+        list.status.success(),
+        "{}",
+        String::from_utf8_lossy(&list.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert!(stdout.contains("local\t31337"));
+    assert!(!stdout.contains("http://127.0.0.1:8545"));
+}
+
+#[test]
 fn serve_supports_mcp_tools_and_alias_metadata() {
     let home = TempDir::new().expect("temp home");
 
@@ -228,9 +280,19 @@ fn serve_supports_chain_management_and_doctor_tools() {
         responses[3]["result"]["structuredContent"]["name"],
         serde_json::json!("local")
     );
+    assert!(
+        responses[3]["result"]["structuredContent"]
+            .get("rpc_url")
+            .is_none()
+    );
     assert_eq!(
         responses[4]["result"]["structuredContent"]["chains"][0]["name"],
         serde_json::json!("local")
+    );
+    assert!(
+        responses[4]["result"]["structuredContent"]["chains"][0]
+            .get("rpc_url")
+            .is_none()
     );
     assert_eq!(
         responses[5]["result"]["structuredContent"]["project"],
@@ -243,6 +305,11 @@ fn serve_supports_chain_management_and_doctor_tools() {
     assert_eq!(
         responses[5]["result"]["structuredContent"]["chains"][0]["chain_id"],
         serde_json::json!(31337)
+    );
+    assert!(
+        responses[5]["result"]["structuredContent"]["chains"][0]
+            .get("rpc_url")
+            .is_none()
     );
 }
 

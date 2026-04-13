@@ -281,6 +281,8 @@ List configured chains:
 cargo run -- list-chains
 ```
 
+`list-chains` prints chain names and ids without echoing stored RPC endpoints.
+
 Chain config is project-local. If `dex` and `launchpad` both use Anvil, each project still needs its own `add-chain` entry.
 
 ### Transactions
@@ -424,7 +426,7 @@ Address-targeting tools accept either:
 
 Most tools also accept an optional `project` field so one server process can target different projects explicitly.
 
-`get_address` and `list_addresses` include alias metadata when available.
+Signer-targeting tool responses include alias/index metadata when available. Chain-management responses do not echo stored RPC endpoints.
 
 ### Minimal Handshake Example
 
@@ -518,4 +520,3 @@ It does not claim to defend against:
 - root on the host
 - same-user process introspection
 - full host compromise
-
