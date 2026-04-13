@@ -107,6 +107,14 @@ Import an existing mnemonic from stdin:
 printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- import
 ```
 
+Import a mnemonic that uses a BIP-39 passphrase:
+
+```sh
+printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- import --prompt-passphrase
+```
+
+The passphrase is not persisted with the seed. Prompt for it on signer-dependent CLI commands, or unlock `serve` at startup for a smoother agent workflow.
+
 Check where SSAW is storing state:
 
 ```sh
@@ -181,6 +189,8 @@ Import directly into a named project:
 printf '%s\n' 'test test test test test test test test test test test junk' | cargo run -- project import dex
 ```
 
+If that project uses a BIP-39 passphrase, add `--prompt-passphrase`.
+
 Switch projects:
 
 ```sh
@@ -216,6 +226,12 @@ Derive the default address:
 
 ```sh
 cargo run -- address
+```
+
+If the project requires a BIP-39 passphrase:
+
+```sh
+cargo run -- address --prompt-passphrase
 ```
 
 Derive another index:
@@ -394,7 +410,15 @@ Run it against a specific project:
 cargo run -- --project dex serve
 ```
 
+Unlock a passphrase-protected project for the lifetime of the server process:
+
+```sh
+cargo run -- --project dex serve --prompt-passphrase
+```
+
 `ssaw serve` speaks line-oriented JSON-RPC 2.0 over stdio and implements the MCP handshake. Within one server process, requests are handled sequentially.
+
+When started with `--prompt-passphrase`, the server keeps that passphrase only in process memory. It is not written back to disk with the seed.
 
 Across multiple CLI and server processes sharing the same project, write operations are serialized by that project's wallet lock file.
 
@@ -425,6 +449,8 @@ Address-targeting tools accept either:
 - `alias`
 
 Most tools also accept an optional `project` field so one server process can target different projects explicitly.
+
+If the server was started with `--prompt-passphrase`, keep requests on that selected project. In-memory unlock state is tied to the project the server started against.
 
 Signer-targeting tool responses include alias/index metadata when available. Chain-management responses do not echo stored RPC endpoints.
 

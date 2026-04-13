@@ -118,13 +118,17 @@ pub struct ContractReadOutput {
 #[derive(Debug, Serialize, Deserialize)]
 struct SeedPayload {
     mnemonic: String,
+    #[serde(default)]
+    passphrase_required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     passphrase: Option<String>,
 }
 
 #[derive(Debug)]
 struct LoadedSeedPayload {
     mnemonic: Zeroizing<String>,
-    passphrase: Option<Zeroizing<String>>,
+    passphrase_required: bool,
+    legacy_passphrase: Option<Zeroizing<String>>,
 }
 
 pub fn init(paths: &Paths) -> Result<(String, WalletSummary)> {
@@ -138,21 +142,25 @@ pub fn init(paths: &Paths) -> Result<(String, WalletSummary)> {
     let mnemonic =
         Mnemonic::generate_in(Language::English, 24).context("failed to generate mnemonic")?;
     let phrase = mnemonic.to_string();
-    persist_phrase(paths, phrase.as_str(), None)?;
-    let address = derive_address(paths, 0)?;
+    persist_phrase(paths, phrase.as_str(), false)?;
+    let address = derive_address(paths, 0, None)?;
 
     Ok((phrase, WalletSummary { address }))
 }
 
 pub fn import(paths: &Paths, phrase: &str, passphrase: Option<&str>) -> Result<WalletSummary> {
     let normalized = normalize_phrase(&phrase)?;
-    persist_phrase(paths, normalized.as_str(), passphrase)?;
-    let address = derive_address(paths, 0)?;
+    persist_phrase(paths, normalized.as_str(), passphrase.is_some())?;
+    let address = derive_address(paths, 0, passphrase)?;
     Ok(WalletSummary { address })
 }
 
-pub fn derive_address(paths: &Paths, index: u32) -> Result<String> {
-    let signer = signer_for_index(paths, index)?;
+pub fn derive_address(
+    paths: &Paths,
+    index: u32,
+    runtime_passphrase: Option<&str>,
+) -> Result<String> {
+    let signer = signer_for_index(paths, index, runtime_passphrase)?;
     Ok(format!("{:#x}", signer.address()))
 }
 
@@ -175,7 +183,11 @@ pub fn resolve_address_target(
     }
 }
 
-pub fn list_addresses(paths: &Paths, count: Option<u32>) -> Result<Vec<DerivedAddress>> {
+pub fn list_addresses(
+    paths: &Paths,
+    count: Option<u32>,
+    runtime_passphrase: Option<&str>,
+) -> Result<Vec<DerivedAddress>> {
     let count = count
         .unwrap_or(DEFAULT_ADDRESS_COUNT)
         .min(MAX_ADDRESS_COUNT);
@@ -185,7 +197,7 @@ pub fn list_addresses(paths: &Paths, count: Option<u32>) -> Result<Vec<DerivedAd
                 .into_iter()
                 .map(|entry| entry.name)
                 .collect();
-            derive_address(paths, index).map(|address| DerivedAddress {
+            derive_address(paths, index, runtime_passphrase).map(|address| DerivedAddress {
                 index,
                 address,
                 aliases,
@@ -201,8 +213,13 @@ pub fn aliases_for_index(paths: &Paths, index: u32) -> Result<Vec<String>> {
         .collect())
 }
 
-pub fn sign_message(paths: &Paths, message: &str, index: u32) -> Result<SignatureOutput> {
-    let signer = signer_for_index(paths, index)?;
+pub fn sign_message(
+    paths: &Paths,
+    message: &str,
+    index: u32,
+    runtime_passphrase: Option<&str>,
+) -> Result<SignatureOutput> {
+    let signer = signer_for_index(paths, index, runtime_passphrase)?;
     let signature = signer
         .sign_message_sync(message.as_bytes())
         .context("failed to sign message")?;
@@ -217,8 +234,9 @@ pub fn sign_typed_data(
     paths: &Paths,
     typed_data_json: &str,
     index: u32,
+    runtime_passphrase: Option<&str>,
 ) -> Result<SignatureOutput> {
-    let signer = signer_for_index(paths, index)?;
+    let signer = signer_for_index(paths, index, runtime_passphrase)?;
     let typed_data: TypedData =
         serde_json::from_str(typed_data_json).context("failed to parse typed data JSON")?;
     let signature = signer
@@ -239,10 +257,11 @@ pub async fn send_transaction(
     data: Option<&str>,
     wait: WaitOptions,
     index: u32,
+    runtime_passphrase: Option<&str>,
 ) -> Result<SentTransaction> {
     let _guard = WriteGuard::acquire(paths)?;
     let chain = chain::resolve(paths, selector)?;
-    let signer = signer_for_index(paths, index)?;
+    let signer = signer_for_index(paths, index, runtime_passphrase)?;
     let rpc_url = chain
         .rpc_url
         .parse()
@@ -306,10 +325,11 @@ pub async fn write_contract(
     value_wei: Option<&str>,
     wait: WaitOptions,
     index: u32,
+    runtime_passphrase: Option<&str>,
 ) -> Result<SentTransaction> {
     let _guard = WriteGuard::acquire(paths)?;
     let chain = chain::resolve(paths, selector)?;
-    let signer = signer_for_index(paths, index)?;
+    let signer = signer_for_index(paths, index, runtime_passphrase)?;
     let rpc_url = chain
         .rpc_url
         .parse()
@@ -388,15 +408,20 @@ pub fn read_secret_line(prompt: &str) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(value))
 }
 
-fn signer_for_index(paths: &Paths, index: u32) -> Result<PrivateKeySigner> {
+fn signer_for_index(
+    paths: &Paths,
+    index: u32,
+    runtime_passphrase: Option<&str>,
+) -> Result<PrivateKeySigner> {
     let payload = load_payload(paths)?;
+    let bip39_passphrase = select_bip39_passphrase(paths, &payload, runtime_passphrase)?;
     let mut builder = MnemonicBuilder::<English>::default()
         .phrase(payload.mnemonic.as_str())
         .index(index)
         .context("failed to apply mnemonic index")?;
 
-    if let Some(passphrase) = payload.passphrase.as_ref() {
-        builder = builder.password(passphrase.as_str());
+    if let Some(passphrase) = bip39_passphrase {
+        builder = builder.password(passphrase);
     }
 
     builder
@@ -404,7 +429,7 @@ fn signer_for_index(paths: &Paths, index: u32) -> Result<PrivateKeySigner> {
         .context("failed to derive signer from mnemonic")
 }
 
-fn persist_phrase(paths: &Paths, phrase: &str, passphrase: Option<&str>) -> Result<()> {
+fn persist_phrase(paths: &Paths, phrase: &str, passphrase_required: bool) -> Result<()> {
     paths.ensure_parent_dirs()?;
     let identity_path = paths.identity_file()?;
     let identity = if identity_path.exists() {
@@ -416,7 +441,8 @@ fn persist_phrase(paths: &Paths, phrase: &str, passphrase: Option<&str>) -> Resu
 
     let payload = SeedPayload {
         mnemonic: phrase.to_owned(),
-        passphrase: passphrase.map(str::to_owned),
+        passphrase_required,
+        passphrase: None,
     };
     let body =
         Zeroizing::new(toml::to_string(&payload).context("failed to serialize seed payload")?);
@@ -485,11 +511,33 @@ fn normalize_phrase(phrase: &str) -> Result<String> {
 
 impl From<SeedPayload> for LoadedSeedPayload {
     fn from(payload: SeedPayload) -> Self {
+        let legacy_passphrase = payload.passphrase.map(Zeroizing::new);
         Self {
             mnemonic: Zeroizing::new(payload.mnemonic),
-            passphrase: payload.passphrase.map(Zeroizing::new),
+            passphrase_required: payload.passphrase_required || legacy_passphrase.is_some(),
+            legacy_passphrase,
         }
     }
+}
+
+fn select_bip39_passphrase<'a>(
+    paths: &Paths,
+    payload: &'a LoadedSeedPayload,
+    runtime_passphrase: Option<&'a str>,
+) -> Result<Option<&'a str>> {
+    if let Some(passphrase) = payload.legacy_passphrase.as_ref() {
+        return Ok(Some(passphrase.as_str()));
+    }
+
+    if payload.passphrase_required {
+        let message = format!(
+            "project `{}` requires a BIP-39 passphrase; rerun with --prompt-passphrase or restart `ssaw serve` with --prompt-passphrase",
+            paths.project_name
+        );
+        return runtime_passphrase.map(Some).with_context(|| message);
+    }
+
+    Ok(None)
 }
 
 fn parse_address(value: &str) -> Result<Address> {

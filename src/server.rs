@@ -3,6 +3,7 @@ use std::io::{self, BufRead, Write};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use zeroize::Zeroizing;
 
 use crate::config::Paths;
 use crate::wallet;
@@ -162,13 +163,17 @@ struct WriteContractParams {
 #[derive(Default)]
 struct ServerState {
     initialized: bool,
+    session_passphrase: Option<Zeroizing<String>>,
 }
 
-pub async fn run(paths: &Paths) -> Result<()> {
+pub async fn run(paths: &Paths, session_passphrase: Option<Zeroizing<String>>) -> Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut output = stdout.lock();
-    let mut state = ServerState::default();
+    let mut state = ServerState {
+        initialized: false,
+        session_passphrase,
+    };
 
     for line in stdin.lock().lines() {
         let line = line.context("failed to read request line")?;
@@ -231,7 +236,7 @@ async fn handle_single_message(
     message: &Value,
 ) -> Option<Value> {
     if let Some(legacy_request) = parse_legacy_request(message) {
-        let reply = handle_legacy_request(paths, &legacy_request).await;
+        let reply = handle_legacy_request(paths, state, &legacy_request).await;
         return Some(serde_json::to_value(reply).expect("legacy response serializes"));
     }
 
@@ -268,8 +273,12 @@ fn parse_legacy_request(message: &Value) -> Option<LegacyRequest> {
     serde_json::from_value(message.clone()).ok()
 }
 
-async fn handle_legacy_request(paths: &Paths, request: &LegacyRequest) -> LegacyResponse {
-    match dispatch_wallet_method(paths, &request.method, &request.params).await {
+async fn handle_legacy_request(
+    paths: &Paths,
+    state: &ServerState,
+    request: &LegacyRequest,
+) -> LegacyResponse {
+    match dispatch_wallet_method(paths, state, &request.method, &request.params).await {
         Ok(result) => LegacyResponse {
             id: request.id.clone(),
             result: Some(result),
@@ -343,11 +352,11 @@ async fn handle_jsonrpc_request(
                 });
             }
 
-            let result = match dispatch_wallet_method(paths, &params.name, &params.arguments).await
-            {
-                Ok(result) => mcp_tool_success(result),
-                Err(error) => mcp_tool_error(error),
-            };
+            let result =
+                match dispatch_wallet_method(paths, state, &params.name, &params.arguments).await {
+                    Ok(result) => mcp_tool_success(result),
+                    Err(error) => mcp_tool_error(error),
+                };
 
             id.map(|id| jsonrpc_result_response(id, result))
         }
@@ -628,20 +637,29 @@ fn chain_schema() -> Value {
     })
 }
 
-async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> Result<Value> {
-    let paths = request_paths(paths, params)?;
+async fn dispatch_wallet_method(
+    paths: &Paths,
+    state: &ServerState,
+    method: &str,
+    params: &Value,
+) -> Result<Value> {
+    let paths = request_paths(paths, params, state.session_passphrase.is_some())?;
+    let session_passphrase = state
+        .session_passphrase
+        .as_ref()
+        .map(|value| value.as_str());
 
     let result = match method {
         "get_address" => parse_params::<AddressParams>(params).and_then(|params| {
             let target =
                 wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
             let aliases = wallet::aliases_for_index(&paths, target.index)?;
-            wallet::derive_address(&paths, target.index).map(|address| {
+            wallet::derive_address(&paths, target.index, session_passphrase).map(|address| {
                 json!({ "address": address, "index": target.index, "alias": target.alias, "aliases": aliases })
             })
         }),
         "list_addresses" => parse_params::<ListAddressesParams>(params)
-            .and_then(|params| wallet::list_addresses(&paths, params.count))
+            .and_then(|params| wallet::list_addresses(&paths, params.count, session_passphrase))
             .map(|addresses| json!({ "addresses": addresses })),
         "list_chains" => parse_params::<ProjectParams>(params)
             .and_then(|_| crate::chain::load(&paths))
@@ -662,7 +680,7 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
         "sign_message" => parse_params::<SignMessageParams>(params).and_then(|params| {
             let target =
                 wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
-            wallet::sign_message(&paths, &params.message, target.index).map(|signed| {
+            wallet::sign_message(&paths, &params.message, target.index, session_passphrase).map(|signed| {
                 json!({ "address": signed.address, "signature": signed.signature, "index": target.index, "alias": target.alias })
             })
         }),
@@ -671,7 +689,7 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
                 .context("failed to serialize typed data payload")?;
             let target =
                 wallet::resolve_address_target(&paths, params.index, params.alias.as_deref())?;
-            wallet::sign_typed_data(&paths, &typed_data, target.index).map(|signed| {
+            wallet::sign_typed_data(&paths, &typed_data, target.index, session_passphrase).map(|signed| {
                 json!({ "address": signed.address, "signature": signed.signature, "index": target.index, "alias": target.alias })
             })
         }),
@@ -688,9 +706,10 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
                 params.data.as_deref(),
                 wallet::WaitOptions::from_flag(params.wait, params.timeout_secs),
                 target.index,
+                session_passphrase,
             )
             .await?;
-            signer_scoped_transaction_result(&paths, &target, sent)
+            signer_scoped_transaction_result(&paths, &target, sent, session_passphrase)
         }
         "read_contract" => {
             let params = parse_params::<ReadContractParams>(params)?;
@@ -725,9 +744,10 @@ async fn dispatch_wallet_method(paths: &Paths, method: &str, params: &Value) -> 
                 params.value_wei.as_deref(),
                 wallet::WaitOptions::from_flag(params.wait, params.timeout_secs),
                 target.index,
+                session_passphrase,
             )
             .await?;
-            signer_scoped_transaction_result(&paths, &target, sent)
+            signer_scoped_transaction_result(&paths, &target, sent, session_passphrase)
         }
         _ => bail!("unknown method `{method}`"),
     }?;
@@ -774,11 +794,16 @@ fn signer_scoped_transaction_result(
     paths: &Paths,
     target: &wallet::AddressTarget,
     sent: wallet::SentTransaction,
+    session_passphrase: Option<&str>,
 ) -> Result<Value> {
     let mut result = serde_json::Map::new();
     result.insert(
         "address".to_owned(),
-        Value::String(wallet::derive_address(paths, target.index)?),
+        Value::String(wallet::derive_address(
+            paths,
+            target.index,
+            session_passphrase,
+        )?),
     );
     result.insert("index".to_owned(), Value::from(target.index));
     result.insert(
@@ -805,9 +830,16 @@ fn signer_scoped_transaction_result(
     Ok(Value::Object(result))
 }
 
-fn request_paths(base_paths: &Paths, params: &Value) -> Result<Paths> {
+fn request_paths(base_paths: &Paths, params: &Value, session_unlocked: bool) -> Result<Paths> {
     match params.get("project") {
-        Some(Value::String(project_name)) => Paths::discover_with_project(Some(project_name)),
+        Some(Value::String(project_name)) => {
+            if session_unlocked && project_name != &base_paths.project_name {
+                bail!(
+                    "project override is not supported while `ssaw serve` is running with an in-memory passphrase; start the server with the target project selected"
+                );
+            }
+            Paths::discover_with_project(Some(project_name))
+        }
         Some(_) => bail!("project must be a string"),
         None => Ok(base_paths.clone()),
     }
@@ -858,17 +890,45 @@ fn doctor(paths: &Paths) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn temp_paths(temp: &TempDir, project_name: &str) -> Paths {
+        let state_dir = temp.path().join(".ssaw");
+        let config_dir = temp.path().join(".config").join("ssaw");
+        let projects_dir = state_dir.join("projects");
+        let project_dir = if project_name == "default" {
+            state_dir.clone()
+        } else {
+            projects_dir.join(project_name)
+        };
+
+        Paths {
+            project_name: project_name.to_owned(),
+            state_dir: state_dir.clone(),
+            project_dir: project_dir.clone(),
+            projects_dir,
+            config_dir: config_dir.clone(),
+            current_project_file: state_dir.join("current-project"),
+            seed_file: project_dir.join("seed.age"),
+            chains_file: project_dir.join("chains.toml"),
+            addresses_file: project_dir.join("addresses.toml"),
+            lock_file: project_dir.join("wallet.lock"),
+            config_file: config_dir.join("config.toml"),
+            default_identity_file: config_dir.join("identity.txt"),
+        }
+    }
 
     #[tokio::test]
     async fn rejects_unknown_legacy_method() {
         let paths = Paths::discover().expect("paths");
+        let state = ServerState::default();
         let request = LegacyRequest {
             id: json!(1),
             method: "nope".to_owned(),
             params: json!({}),
         };
 
-        let response = handle_legacy_request(&paths, &request).await;
+        let response = handle_legacy_request(&paths, &state, &request).await;
         assert!(
             response
                 .error
@@ -892,8 +952,21 @@ mod tests {
     #[test]
     fn rejects_non_string_project_override() {
         let paths = Paths::discover().expect("paths");
-        let error = request_paths(&paths, &json!({ "project": 1 })).expect_err("project error");
+        let error =
+            request_paths(&paths, &json!({ "project": 1 }), false).expect_err("project error");
         assert!(error.to_string().contains("project must be a string"));
+    }
+
+    #[test]
+    fn rejects_project_override_while_session_unlock_is_active() {
+        let paths = Paths::discover_with_project(Some("dex")).expect("paths");
+        let error = request_paths(&paths, &json!({ "project": "launchpad" }), true)
+            .expect_err("project override error");
+        assert!(
+            error
+                .to_string()
+                .contains("project override is not supported")
+        );
     }
 
     #[tokio::test]
@@ -937,6 +1010,54 @@ mod tests {
         assert_eq!(
             response.result.expect("result")["capabilities"]["tools"]["listChanged"],
             false
+        );
+    }
+
+    #[tokio::test]
+    async fn locked_server_rejects_signer_operations_for_passphrase_project() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = temp_paths(&temp, "dex");
+        paths.ensure_parent_dirs().expect("dirs");
+        crate::wallet::ensure_identity(&paths).expect("identity");
+        crate::wallet::import(
+            &paths,
+            "test test test test test test test test test test test junk",
+            Some("secret"),
+        )
+        .expect("import");
+
+        let state = ServerState::default();
+        let error = dispatch_wallet_method(&paths, &state, "get_address", &json!({}))
+            .await
+            .expect_err("locked error");
+        assert!(error.to_string().contains("requires a BIP-39 passphrase"));
+    }
+
+    #[tokio::test]
+    async fn unlocked_server_can_derive_for_passphrase_project() {
+        let temp = TempDir::new().expect("tempdir");
+        let paths = temp_paths(&temp, "dex");
+        paths.ensure_parent_dirs().expect("dirs");
+        crate::wallet::ensure_identity(&paths).expect("identity");
+        crate::wallet::import(
+            &paths,
+            "test test test test test test test test test test test junk",
+            Some("secret"),
+        )
+        .expect("import");
+
+        let state = ServerState {
+            initialized: false,
+            session_passphrase: Some(Zeroizing::new("secret".to_owned())),
+        };
+        let response = dispatch_wallet_method(&paths, &state, "get_address", &json!({}))
+            .await
+            .expect("get address");
+        assert!(
+            response["address"]
+                .as_str()
+                .expect("address")
+                .starts_with("0x")
         );
     }
 

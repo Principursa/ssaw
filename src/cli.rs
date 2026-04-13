@@ -36,7 +36,7 @@ enum Command {
     ReadContract(ReadContractArgs),
     WriteContract(WriteContractArgs),
     Doctor,
-    Serve,
+    Serve(ServeArgs),
 }
 
 #[derive(Debug, Subcommand)]
@@ -63,8 +63,8 @@ struct ProjectInitArgs {
 #[derive(Debug, Args)]
 struct ProjectImportArgs {
     name: String,
-    #[arg(long, default_value_t = false)]
-    passphrase_stdin: bool,
+    #[command(flatten)]
+    passphrase: PromptPassphraseArgs,
 }
 
 #[derive(Debug, Args)]
@@ -74,14 +74,16 @@ struct ProjectUseArgs {
 
 #[derive(Debug, Args)]
 struct ImportArgs {
-    #[arg(long, default_value_t = false)]
-    passphrase_stdin: bool,
+    #[command(flatten)]
+    passphrase: PromptPassphraseArgs,
 }
 
 #[derive(Debug, Args)]
 struct AddressArgs {
     #[command(flatten)]
     target: AddressTargetArgs,
+    #[command(flatten)]
+    passphrase: PromptPassphraseArgs,
 }
 
 #[derive(Debug, Args, Default, Clone)]
@@ -119,12 +121,16 @@ struct SignMessageArgs {
     message: String,
     #[command(flatten)]
     target: AddressTargetArgs,
+    #[command(flatten)]
+    passphrase: PromptPassphraseArgs,
 }
 
 #[derive(Debug, Args)]
 struct SignTypedDataArgs {
     #[command(flatten)]
     target: AddressTargetArgs,
+    #[command(flatten)]
+    passphrase: PromptPassphraseArgs,
 }
 
 #[derive(Debug, Args)]
@@ -143,6 +149,8 @@ struct SendTransactionArgs {
     timeout_secs: u64,
     #[command(flatten)]
     target: AddressTargetArgs,
+    #[command(flatten)]
+    passphrase: PromptPassphraseArgs,
 }
 
 #[derive(Debug, Args)]
@@ -179,6 +187,25 @@ struct WriteContractArgs {
     timeout_secs: u64,
     #[command(flatten)]
     target: AddressTargetArgs,
+    #[command(flatten)]
+    passphrase: PromptPassphraseArgs,
+}
+
+#[derive(Debug, Args, Clone, Default)]
+struct PromptPassphraseArgs {
+    #[arg(
+        short = 'p',
+        long = "prompt-passphrase",
+        visible_alias = "pp",
+        default_value_t = false
+    )]
+    prompt_passphrase: bool,
+}
+
+#[derive(Debug, Args)]
+struct ServeArgs {
+    #[command(flatten)]
+    passphrase: PromptPassphraseArgs,
 }
 
 pub async fn run() -> Result<()> {
@@ -199,7 +226,7 @@ pub async fn run() -> Result<()> {
         Command::ReadContract(args) => cmd_read_contract(&paths, args).await,
         Command::WriteContract(args) => cmd_write_contract(&paths, args).await,
         Command::Doctor => cmd_doctor(&paths),
-        Command::Serve => cmd_serve(&paths).await,
+        Command::Serve(args) => cmd_serve(&paths, args).await,
     }
 }
 
@@ -250,7 +277,7 @@ fn cmd_project_import(paths: &Paths, args: ProjectImportArgs) -> Result<()> {
     project_paths.ensure_parent_dirs()?;
     paths.write_current_project(&args.name)?;
     let phrase = wallet::read_secret_from_stdin()?;
-    let passphrase = if args.passphrase_stdin {
+    let passphrase = if args.passphrase.prompt_passphrase {
         Some(wallet::read_secret_line("BIP-39 passphrase: ")?)
     } else {
         None
@@ -347,7 +374,7 @@ fn cmd_init(paths: &Paths) -> Result<()> {
 
 fn cmd_import(paths: &Paths, args: ImportArgs) -> Result<()> {
     let phrase = wallet::read_secret_from_stdin()?;
-    let passphrase = if args.passphrase_stdin {
+    let passphrase = if args.passphrase.prompt_passphrase {
         Some(wallet::read_secret_line("BIP-39 passphrase: ")?)
     } else {
         None
@@ -365,7 +392,12 @@ fn cmd_import(paths: &Paths, args: ImportArgs) -> Result<()> {
 fn cmd_address(paths: &Paths, args: AddressArgs) -> Result<()> {
     let target =
         wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
-    let address = wallet::derive_address(paths, target.index)?;
+    let passphrase = maybe_prompt_passphrase(&args.passphrase)?;
+    let address = wallet::derive_address(
+        paths,
+        target.index,
+        passphrase.as_ref().map(|value| value.as_str()),
+    )?;
     println!("{address}");
     Ok(())
 }
@@ -397,17 +429,29 @@ fn cmd_list_chains(paths: &Paths) -> Result<()> {
 fn cmd_sign_message(paths: &Paths, args: SignMessageArgs) -> Result<()> {
     let target =
         wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
-    let output = wallet::sign_message(paths, &args.message, target.index)?;
+    let passphrase = maybe_prompt_passphrase(&args.passphrase)?;
+    let output = wallet::sign_message(
+        paths,
+        &args.message,
+        target.index,
+        passphrase.as_ref().map(|value| value.as_str()),
+    )?;
     println!("{}", output.signature);
     Ok(())
 }
 
 fn cmd_sign_typed_data(paths: &Paths, args: SignTypedDataArgs) -> Result<()> {
+    let passphrase = maybe_prompt_passphrase(&args.passphrase)?;
     let typed_data_json =
         wallet::read_phrase_from_stdin().context("failed to read typed data JSON from stdin")?;
     let target =
         wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
-    let output = wallet::sign_typed_data(paths, &typed_data_json, target.index)?;
+    let output = wallet::sign_typed_data(
+        paths,
+        &typed_data_json,
+        target.index,
+        passphrase.as_ref().map(|value| value.as_str()),
+    )?;
     println!("{}", output.signature);
     Ok(())
 }
@@ -416,6 +460,7 @@ async fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Resul
     let selector = chain::ChainSelector::parse(&args.chain);
     let target =
         wallet::resolve_address_target(paths, args.target.index, args.target.alias.as_deref())?;
+    let passphrase = maybe_prompt_passphrase(&args.passphrase)?;
     let sent = wallet::send_transaction(
         paths,
         &selector,
@@ -424,6 +469,7 @@ async fn cmd_send_transaction(paths: &Paths, args: SendTransactionArgs) -> Resul
         args.data.as_deref(),
         wallet::WaitOptions::from_flag(args.wait, args.timeout_secs),
         target.index,
+        passphrase.as_ref().map(|value| value.as_str()),
     )
     .await?;
     if sent.confirmed {
@@ -466,6 +512,7 @@ async fn cmd_write_contract(paths: &Paths, args: WriteContractArgs) -> Result<()
         bail!("`ssaw write-contract` requires --abi-stdin");
     }
 
+    let passphrase = maybe_prompt_passphrase(&args.passphrase)?;
     let abi_json =
         wallet::read_phrase_from_stdin().context("failed to read ABI JSON from stdin")?;
     let selector = chain::ChainSelector::parse(&args.chain);
@@ -481,6 +528,7 @@ async fn cmd_write_contract(paths: &Paths, args: WriteContractArgs) -> Result<()
         args.value_wei.as_deref(),
         wallet::WaitOptions::from_flag(args.wait, args.timeout_secs),
         target.index,
+        passphrase.as_ref().map(|value| value.as_str()),
     )
     .await?;
     if sent.confirmed {
@@ -528,10 +576,21 @@ fn cmd_doctor(paths: &Paths) -> Result<()> {
     Ok(())
 }
 
-async fn cmd_serve(paths: &Paths) -> Result<()> {
-    server::run(paths).await
+async fn cmd_serve(paths: &Paths, args: ServeArgs) -> Result<()> {
+    let passphrase = maybe_prompt_passphrase(&args.passphrase)?;
+    server::run(paths, passphrase).await
 }
 
 fn exists_marker(path: &std::path::Path) -> &'static str {
     if path.exists() { "exists" } else { "missing" }
+}
+
+fn maybe_prompt_passphrase(
+    args: &PromptPassphraseArgs,
+) -> Result<Option<zeroize::Zeroizing<String>>> {
+    if args.prompt_passphrase {
+        return wallet::read_secret_line("BIP-39 passphrase: ").map(Some);
+    }
+
+    Ok(None)
 }
