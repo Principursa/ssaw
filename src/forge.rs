@@ -86,7 +86,7 @@ impl TransientKeystore {
 }
 
 pub async fn run(paths: &Paths, options: ForgeOptions<'_>) -> Result<ForgeOutput> {
-    which_forge()?;
+    which_forge().await?;
 
     let _guard = crate::wallet::WriteGuard::acquire(paths)?;
     let signer = wallet::signer_for_index(paths, options.index, options.runtime_passphrase)?;
@@ -160,12 +160,13 @@ pub async fn run(paths: &Paths, options: ForgeOptions<'_>) -> Result<ForgeOutput
     }
 }
 
-fn which_forge() -> Result<()> {
-    match std::process::Command::new("forge")
+async fn which_forge() -> Result<()> {
+    match tokio::process::Command::new("forge")
         .arg("--version")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
+        .await
     {
         Ok(status) if status.success() => Ok(()),
         _ => bail!(
@@ -188,7 +189,7 @@ fn build_forge_args(
     args.push("--password-file".to_owned());
     args.push(password_file_path.display().to_string());
 
-    if !user_args.iter().any(|arg| arg == "--sender") {
+    if !user_args.iter().any(|arg| arg == "--sender" || arg == "-s") {
         args.push("--sender".to_owned());
         args.push(sender.to_owned());
     }
