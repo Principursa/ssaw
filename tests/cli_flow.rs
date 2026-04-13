@@ -521,6 +521,188 @@ fn mcp_invalid_rpc_url_error_does_not_echo_configured_url() {
 }
 
 #[test]
+fn doctor_cli_reports_project_and_paths() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let doctor = ssaw_cmd(home.path())
+        .args(["doctor"])
+        .output()
+        .expect("doctor");
+    assert!(
+        doctor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+    assert!(stdout.contains("project\tdex"));
+    assert!(stdout.contains("seed_file"));
+    assert!(stdout.contains("exists"));
+    assert!(stdout.contains("identity_file"));
+    assert!(stdout.contains("chains_file"));
+    assert!(stdout.contains("addresses_file"));
+}
+
+#[test]
+fn doctor_cli_shows_missing_for_absent_files() {
+    let home = TempDir::new().expect("temp home");
+
+    // Use a project that has no seed yet — just set current-project
+    let project_use = ssaw_cmd(home.path())
+        .args(["project", "init", "empty"])
+        .output()
+        .expect("project init");
+    assert!(
+        project_use.status.success(),
+        "{}",
+        String::from_utf8_lossy(&project_use.stderr)
+    );
+
+    // Remove the seed file to simulate missing state
+    let seed_file = home.path().join(".ssaw/projects/empty/seed.age");
+    let _ = std::fs::remove_file(&seed_file);
+
+    let doctor = ssaw_cmd(home.path())
+        .args(["doctor"])
+        .output()
+        .expect("doctor");
+    assert!(
+        doctor.status.success(),
+        "{}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&doctor.stdout);
+    assert!(stdout.contains("project\tempty"));
+    assert!(stdout.contains("seed_file"));
+    assert!(stdout.contains("missing"));
+}
+
+#[test]
+fn init_on_existing_seed_fails() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(init.status.success());
+
+    // Second init on same project should fail
+    let init2 = ssaw_cmd(home.path())
+        .args(["init"])
+        .output()
+        .expect("second init");
+    assert!(!init2.status.success());
+    let stderr = String::from_utf8_lossy(&init2.stderr);
+    assert!(stderr.contains("seed file already exists"));
+}
+
+#[test]
+fn import_invalid_mnemonic_fails() {
+    let home = TempDir::new().expect("temp home");
+
+    // Create project dir structure without a seed
+    let project_use = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(project_use.status.success());
+
+    // Remove seed so import can proceed
+    let seed_file = home.path().join(".ssaw/projects/dex/seed.age");
+    let _ = std::fs::remove_file(&seed_file);
+
+    let import = ssaw_cmd(home.path())
+        .args(["import"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn import");
+    let import = feed_stdin_and_wait(import, "not a valid mnemonic phrase at all");
+    assert!(!import.status.success());
+    let stderr = String::from_utf8_lossy(&import.stderr);
+    assert!(stderr.contains("mnemonic is not valid BIP-39"));
+}
+
+#[test]
+fn project_use_nonexistent_fails() {
+    let home = TempDir::new().expect("temp home");
+
+    // Create state dir by initializing default project
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(init.status.success());
+
+    let use_cmd = ssaw_cmd(home.path())
+        .args(["project", "use", "nonexistent"])
+        .output()
+        .expect("project use");
+    assert!(!use_cmd.status.success());
+    let stderr = String::from_utf8_lossy(&use_cmd.stderr);
+    assert!(stderr.contains("unknown project"));
+}
+
+#[test]
+fn add_chain_requires_rpc_url_stdin_flag() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(init.status.success());
+
+    let add = ssaw_cmd(home.path())
+        .args(["add-chain", "local", "31337"])
+        .output()
+        .expect("add chain");
+    assert!(!add.status.success());
+    let stderr = String::from_utf8_lossy(&add.stderr);
+    assert!(stderr.contains("--rpc-url-stdin"));
+}
+
+#[test]
+fn read_contract_requires_abi_stdin_flag() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(init.status.success());
+
+    let read = ssaw_cmd(home.path())
+        .args([
+            "read-contract",
+            "--chain",
+            "local",
+            "--address",
+            "0x000000000000000000000000000000000000dead",
+            "--function",
+            "counter",
+        ])
+        .output()
+        .expect("read contract");
+    assert!(!read.status.success());
+    let stderr = String::from_utf8_lossy(&read.stderr);
+    assert!(stderr.contains("--abi-stdin"));
+}
+
+#[test]
 fn serve_rejects_project_override_in_single_project_mode() {
     let home = TempDir::new().expect("temp home");
 
@@ -554,4 +736,304 @@ fn serve_rejects_project_override_in_single_project_mode() {
         .as_str()
         .expect("error");
     assert!(error.contains("project override is not supported"));
+}
+
+#[test]
+fn serve_unknown_alias_returns_error_with_project_context() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(
+        init.status.success(),
+        "{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_address","arguments":{"alias":"nonexistent"}}}"#,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 2);
+    let error = responses[1]["result"]["structuredContent"]["error"]
+        .as_str()
+        .expect("error");
+    assert!(error.contains("unknown alias `nonexistent`"));
+    assert!(error.contains("project `dex`"));
+}
+
+#[test]
+fn serve_malformed_abi_returns_error() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(init.status.success());
+
+    let add_chain = ssaw_cmd(home.path())
+        .args(["add-chain", "local", "31337", "--rpc-url-stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map(|child| feed_stdin_and_wait(child, "http://127.0.0.1:8545"))
+        .expect("add chain");
+    assert!(add_chain.status.success());
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_contract","arguments":{"chain":"local","address":"0x000000000000000000000000000000000000dead","function":"counter","abi":"not-valid-json"}}}"#,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 2);
+    assert_eq!(responses[1]["result"]["isError"], true);
+}
+
+#[test]
+fn serve_unknown_tool_returns_error() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(init.status.success());
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"nonexistent_tool","arguments":{}}}"#,
+        ],
+    );
+    assert!(output.status.success());
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 2);
+    let error = &responses[1]["error"];
+    assert!(error["message"]
+        .as_str()
+        .expect("error message")
+        .contains("unknown tool"));
+}
+
+#[test]
+fn serve_sign_message_returns_signer_metadata() {
+    let home = TempDir::new().expect("temp home");
+
+    let import = ssaw_cmd(home.path())
+        .args(["project", "import", "dex"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn import");
+    let import = feed_stdin_and_wait(import, TEST_MNEMONIC);
+    assert!(
+        import.status.success(),
+        "{}",
+        String::from_utf8_lossy(&import.stderr)
+    );
+
+    let set_alias = ssaw_cmd(home.path())
+        .args([
+            "alias", "set", "signer", "--index", "0", "--label", "default-signer",
+        ])
+        .output()
+        .expect("set alias");
+    assert!(set_alias.status.success());
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"sign_message","arguments":{"message":"hello","alias":"signer"}}}"#,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 2);
+    let structured = &responses[1]["result"]["structuredContent"];
+    assert_eq!(structured["project"], "dex");
+    assert_eq!(structured["alias"], "signer");
+    assert_eq!(structured["index"], serde_json::json!(0));
+    assert!(
+        structured["address"]
+            .as_str()
+            .expect("address")
+            .starts_with("0x")
+    );
+    assert!(
+        structured["signature"]
+            .as_str()
+            .expect("signature")
+            .starts_with("0x")
+    );
+}
+
+#[test]
+fn serve_sign_typed_data_returns_signer_metadata() {
+    let home = TempDir::new().expect("temp home");
+
+    let import = ssaw_cmd(home.path())
+        .args(["project", "import", "dex"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn import");
+    let import = feed_stdin_and_wait(import, TEST_MNEMONIC);
+    assert!(import.status.success());
+
+    let set_alias = ssaw_cmd(home.path())
+        .args(["alias", "set", "admin", "--index", "1"])
+        .output()
+        .expect("set alias");
+    assert!(set_alias.status.success());
+
+    let typed_data_request = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"sign_typed_data","arguments":{{"typed_data":{},"index":1}}}}}}"#,
+        TEST_TYPED_DATA
+    );
+
+    let output = run_server_requests(home.path(), &[&typed_data_request]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 2);
+    let structured = &responses[1]["result"]["structuredContent"];
+    assert_eq!(structured["project"], "dex");
+    assert_eq!(structured["index"], serde_json::json!(1));
+    assert!(
+        structured["signature"]
+            .as_str()
+            .expect("signature")
+            .starts_with("0x")
+    );
+}
+
+#[test]
+fn serve_list_addresses_returns_addresses_with_alias_metadata() {
+    let home = TempDir::new().expect("temp home");
+
+    let import = ssaw_cmd(home.path())
+        .args(["project", "import", "dex"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn import");
+    let import = feed_stdin_and_wait(import, TEST_MNEMONIC);
+    assert!(import.status.success());
+
+    let set_alias = ssaw_cmd(home.path())
+        .args(["alias", "set", "deployer", "--index", "0"])
+        .output()
+        .expect("set alias");
+    assert!(set_alias.status.success());
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_addresses","arguments":{"count":3}}}"#,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 2);
+    let structured = &responses[1]["result"]["structuredContent"];
+    assert_eq!(structured["project"], "dex");
+    let addresses = structured["addresses"].as_array().expect("addresses array");
+    assert_eq!(addresses.len(), 3);
+    assert!(
+        addresses[0]["address"]
+            .as_str()
+            .expect("address")
+            .starts_with("0x")
+    );
+    assert_eq!(addresses[0]["index"], serde_json::json!(0));
+    assert_eq!(addresses[0]["aliases"], serde_json::json!(["deployer"]));
+    // Index 1 and 2 have no aliases — field is omitted by skip_serializing_if
+    assert!(addresses[1].get("aliases").is_none() || addresses[1]["aliases"] == serde_json::json!([]));
+    assert!(addresses[2].get("aliases").is_none() || addresses[2]["aliases"] == serde_json::json!([]));
+}
+
+#[test]
+fn serve_both_index_and_alias_returns_error() {
+    let home = TempDir::new().expect("temp home");
+
+    let init = ssaw_cmd(home.path())
+        .args(["project", "init", "dex"])
+        .output()
+        .expect("project init");
+    assert!(init.status.success());
+
+    let output = run_server_requests(
+        home.path(),
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_address","arguments":{"index":0,"alias":"deployer"}}}"#,
+        ],
+    );
+    assert!(output.status.success());
+
+    let responses: Vec<Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("parse response line"))
+        .collect();
+    assert_eq!(responses.len(), 2);
+    let error = responses[1]["result"]["structuredContent"]["error"]
+        .as_str()
+        .expect("error");
+    assert!(error.contains("either index or alias"));
 }
